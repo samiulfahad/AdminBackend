@@ -1,0 +1,76 @@
+@baseUrl = http://localhost:3000
+@catalogId = 69a70b992c76412ea1978d17
+@categoryId = 69a444868789843e16ec5ee8
+@schemaId = 69a4c8e1aefbe4654b003618
+
+### List all testCatalogs
+GET {{baseUrl}}/api/testCatalogs
+
+###
+
+### List testCatalogs filtered by categoryId
+GET {{baseUrl}}/api/testCatalogs?categoryId={{categoryId}}
+
+###
+
+### Get one testCatalog
+GET {{baseUrl}}/api/testCatalogs/{{catalogId}}
+
+###
+
+### Create a testCatalog (with schemaId)
+POST {{baseUrl}}/api/testCatalogs
+Content-Type: application/json
+
+{
+  "name": "RBS",
+  "categoryId": "{{categoryId}}",
+  "schemaId": "{{schemaId}}"
+}
+
+###
+
+### Create a testCatalog (without schemaId)
+POST {{baseUrl}}/api/testCatalogs
+Content-Type: application/json
+
+{
+  "name": "RBS",
+  "categoryId": "{{categoryId}}",
+  "schemaId": null
+}
+
+###
+
+### Update testCatalog name
+PATCH {{baseUrl}}/api/testCatalogs/{{catalogId}}
+Content-Type: application/json
+
+{
+  "name": "RBS Updated"
+}
+
+###
+
+### Update testCatalog — change category
+PATCH {{baseUrl}}/api/testCatalogs/{{catalogId}}
+Content-Type: application/json
+
+{
+  "categoryId": "{{categoryId}}"
+}
+
+###
+
+### Update testCatalog — set schemaId to null
+PATCH {{baseUrl}}/api/testCatalogs/{{catalogId}}
+Content-Type: application/json
+
+{
+  "schemaId": null
+}
+
+###
+
+### Delete a testCatalog
+DELETE {{baseUrl}}/api/testCatalogs/{{catalogId}}

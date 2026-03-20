@@ -1,0 +1,35 @@
+@baseUrl = http://localhost:3000
+@categoryId = 69a444868789843e16ec5ee8
+
+### List all categories
+GET {{baseUrl}}/api/categories
+
+###
+
+### Get one category
+GET {{baseUrl}}/api/categories/{{categoryId}}
+
+###
+
+### Create a category
+POST {{baseUrl}}/api/categories
+Content-Type: application/json
+
+{
+  "name": "XRAY"
+}
+
+###
+
+### Update a category
+PATCH {{baseUrl}}/api/categories/{{categoryId}}
+Content-Type: application/json
+
+{
+  "name": "XRAY Updated"
+}
+
+###
+
+### Delete a category
+DELETE {{baseUrl}}/api/categories/{{categoryId}}
