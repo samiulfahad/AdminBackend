@@ -1,10 +1,10 @@
-@baseUrl = http://localhost:3000
+@baseUrl = http://127.0.0.1:5000
 @catalogId = 69a70b992c76412ea1978d17
 @categoryId = 69a444868789843e16ec5ee8
 @schemaId = 69a4c8e1aefbe4654b003618
 
 ### List all testCatalogs
-GET {{baseUrl}}/api/testCatalogs
+GET {{baseUrl}}/api/test/all
 
 ###
 

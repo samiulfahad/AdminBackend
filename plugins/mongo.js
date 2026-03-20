@@ -1,14 +1,14 @@
 import fastifyPlugin from "fastify-plugin";
-import mongoPlugin from "@fastify/mongodb";
+import mongodb from "@fastify/mongodb";
 
-// fastify-plugin v5 uses a default export — named `fp` alias no longer needed
 export default fastifyPlugin(async function (fastify) {
-  const mongoUri = process.env.MONGO_URI || "mongodb://localhost:27017";
+  const mongoUri = process.env.CLOUD_DB
 
-  await fastify.register(mongoPlugin, {
+  await fastify.register(mongodb, {
     forceClose: true,
     url: mongoUri,
+    database: "labpilot",
   });
 
-  fastify.log.info(`MongoDB connected: ${mongoUri}`);
+  fastify.log.info('MongoDB connected');
 });

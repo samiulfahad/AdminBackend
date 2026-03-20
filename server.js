@@ -1,32 +1,33 @@
+import "dotenv/config";
+
 import Fastify from "fastify";
 import mongoPlugin from "./plugins/mongo.js";
 import categoryRoutes from "./routes/category.js";
 import testRoutes from "./routes/test.js";
 
 const fastify = Fastify({
+  disableRequestLogging: true,
   logger: {
-    level: process.env.LOG_LEVEL || "info",
-    transport:
-      process.env.NODE_ENV !== "production"
-        ? {
-            target: "pino-pretty",
-            options: { colorize: true, translateTime: "HH:MM:ss Z" },
-          }
-        : undefined,
+    transport: {
+      target: "pino-pretty",
+      options: {
+        ignore: "pid,hostname,level,time,reqId,req,res,responseTime",
+      },
+    },
   },
 });
 
-// ── Plugins ─────────────────────────────────────────────
+// ── Plugins ───────────────────────────────────────────────────────────────────
 await fastify.register(mongoPlugin);
 
-// ── Routes ──────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────────────
 await fastify.register(categoryRoutes, { prefix: "/api" });
 await fastify.register(testRoutes, { prefix: "/api" });
 
-// ── Health check ────────────────────────────────────────
+// ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));
 
-// ── Start ────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 

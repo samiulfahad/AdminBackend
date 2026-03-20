@@ -1,4 +1,4 @@
-@baseUrl = http://localhost:3000
+@baseUrl = http://127.0.0.1:5000
 @categoryId = 69a444868789843e16ec5ee8
 
 ### List all categories

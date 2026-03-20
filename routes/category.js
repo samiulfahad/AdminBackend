@@ -1,12 +1,11 @@
 import { ObjectId } from "@fastify/mongodb";
 
 // JSON Schemas
-const categorySchema = {
-  type: "object",
-  properties: {
-    _id: { type: "string" },
-    name: { type: "string" },
-  },
+const OID = {
+  type: "string",
+  minLength: 24,
+  maxLength: 24,
+  pattern: "^[a-fA-F0-9]{24}$",
 };
 
 const createCategoryBody = {
@@ -30,16 +29,13 @@ const idParam = {
   type: "object",
   additionalProperties: false,
   properties: {
-    id: { type: "string", minLength: 24, maxLength: 24 },
+    id: OID,
   },
 };
 
 export default async function categoryRoutes(fastify) {
-  const DB_NAME = "category";
-  const COLLECTION = "categories";
-
   function col() {
-    return fastify.mongo.client.db(DB_NAME).collection(COLLECTION);
+    return fastify.mongo.db.collection("testCategory");
   }
 
   function toId(id) {
@@ -57,12 +53,6 @@ export default async function categoryRoutes(fastify) {
       schema: {
         tags: ["Category"],
         summary: "List all categories",
-        response: {
-          200: {
-            type: "array",
-            items: categorySchema,
-          },
-        },
       },
     },
     async (request, reply) => {
@@ -79,10 +69,6 @@ export default async function categoryRoutes(fastify) {
         tags: ["Category"],
         summary: "Get a category by ID",
         params: idParam,
-        response: {
-          200: categorySchema,
-          404: { type: "object", properties: { message: { type: "string" } } },
-        },
       },
     },
     async (request, reply) => {
@@ -104,9 +90,6 @@ export default async function categoryRoutes(fastify) {
         tags: ["Category"],
         summary: "Create a new category",
         body: createCategoryBody,
-        response: {
-          201: categorySchema,
-        },
       },
     },
     async (request, reply) => {
@@ -131,10 +114,6 @@ export default async function categoryRoutes(fastify) {
         summary: "Update a category",
         params: idParam,
         body: updateCategoryBody,
-        response: {
-          200: categorySchema,
-          404: { type: "object", properties: { message: { type: "string" } } },
-        },
       },
     },
     async (request, reply) => {
@@ -165,10 +144,6 @@ export default async function categoryRoutes(fastify) {
         tags: ["Category"],
         summary: "Delete a category",
         params: idParam,
-        response: {
-          200: { type: "object", properties: { message: { type: "string" } } },
-          404: { type: "object", properties: { message: { type: "string" } } },
-        },
       },
     },
     async (request, reply) => {

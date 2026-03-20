@@ -1,17 +1,18 @@
 import { ObjectId } from "@fastify/mongodb";
 
 // JSON Schemas
-const OID = { type: "string", pattern: "^[a-fA-F0-9]{24}$" };
-const OID_NULLABLE = { type: ["string", "null"], pattern: "^[a-fA-F0-9]{24}$" };
+const OID = {
+  type: "string",
+  minLength: 24,
+  maxLength: 24,
+  pattern: "^[a-fA-F0-9]{24}$",
+};
 
-const testSchema = {
-  type: "object",
-  properties: {
-    _id: OID,
-    name: { type: "string" },
-    categoryId: OID,
-    schemaId: OID_NULLABLE,
-  },
+const OID_NULLABLE = {
+  type: ["string", "null"],
+  minLength: 24,
+  maxLength: 24,
+  pattern: "^[a-fA-F0-9]{24}$",
 };
 
 const createTestBody = {
@@ -44,15 +45,12 @@ const idParam = {
 };
 
 export default async function testRoutes(fastify) {
-  const DB_NAME = "testCatalog";
-  const COLLECTION = "testCatalog";
-
   function col() {
-    return fastify.mongo.client.db(DB_NAME).collection(COLLECTION);
+    return fastify.mongo.db.collection("testCatalog");
   }
 
   function categoryCol() {
-    return fastify.mongo.client.db("category").collection("categories");
+    return fastify.mongo.db.collection("testCategories");
   }
 
   function toId(id) {
@@ -74,7 +72,7 @@ export default async function testRoutes(fastify) {
 
   // GET /test — list all (optionally filter by categoryId)
   fastify.get(
-    "/test",
+    "/test/all",
     {
       schema: {
         tags: ["Test"],
@@ -84,9 +82,6 @@ export default async function testRoutes(fastify) {
           properties: {
             categoryId: { type: "string" },
           },
-        },
-        response: {
-          200: { type: "array", items: testSchema },
         },
       },
     },
@@ -112,10 +107,6 @@ export default async function testRoutes(fastify) {
         tags: ["Test"],
         summary: "Get a test by ID",
         params: idParam,
-        response: {
-          200: testSchema,
-          404: { type: "object", properties: { message: { type: "string" } } },
-        },
       },
     },
     async (request, reply) => {
@@ -137,7 +128,6 @@ export default async function testRoutes(fastify) {
         tags: ["Test"],
         summary: "Create a new test",
         body: createTestBody,
-        response: { 201: testSchema },
       },
     },
     async (request, reply) => {
@@ -171,10 +161,6 @@ export default async function testRoutes(fastify) {
         summary: "Update a test",
         params: idParam,
         body: updateTestBody,
-        response: {
-          200: testSchema,
-          404: { type: "object", properties: { message: { type: "string" } } },
-        },
       },
     },
     async (request, reply) => {
@@ -220,10 +206,6 @@ export default async function testRoutes(fastify) {
         tags: ["Test"],
         summary: "Delete a test",
         params: idParam,
-        response: {
-          200: { type: "object", properties: { message: { type: "string" } } },
-          404: { type: "object", properties: { message: { type: "string" } } },
-        },
       },
     },
     async (request, reply) => {
