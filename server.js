@@ -2,8 +2,8 @@ import "dotenv/config";
 
 import Fastify from "fastify";
 import mongoPlugin from "./plugins/mongo.js";
-import categoryRoutes from "./routes/category.js";
-import testRoutes from "./routes/test.js";
+import categoryRoutes from "./routes/category/category.js";
+import testRoutes from "./routes/test/test.js";
 
 const fastify = Fastify({
   disableRequestLogging: true,
