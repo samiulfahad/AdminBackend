@@ -1,11 +1,8 @@
 import Fastify from "fastify";
 import mongoPlugin from "./plugins/mongo.js";
 import categoryRoutes from "./routes/category.js";
-import testCatalogRoutes from "./routes/testCatalog.js";
+import testRoutes from "./routes/test.js";
 
-// v5: pino transport config stays in `logger`, but a custom pino *instance*
-// would now use `loggerInstance` instead. Using built-in pino options here
-// is still correct in v5.
 const fastify = Fastify({
   logger: {
     level: process.env.LOG_LEVEL || "info",
@@ -24,7 +21,7 @@ await fastify.register(mongoPlugin);
 
 // ── Routes ──────────────────────────────────────────────
 await fastify.register(categoryRoutes, { prefix: "/api" });
-await fastify.register(testCatalogRoutes, { prefix: "/api" });
+await fastify.register(testRoutes, { prefix: "/api" });
 
 // ── Health check ────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));

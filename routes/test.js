@@ -4,7 +4,7 @@ import { ObjectId } from "@fastify/mongodb";
 const OID = { type: "string", pattern: "^[a-fA-F0-9]{24}$" };
 const OID_NULLABLE = { type: ["string", "null"], pattern: "^[a-fA-F0-9]{24}$" };
 
-const testCatalogSchema = {
+const testSchema = {
   type: "object",
   properties: {
     _id: OID,
@@ -14,7 +14,7 @@ const testCatalogSchema = {
   },
 };
 
-const createTestCatalogBody = {
+const createTestBody = {
   type: "object",
   required: ["name", "categoryId"],
   properties: {
@@ -25,7 +25,7 @@ const createTestCatalogBody = {
   additionalProperties: false,
 };
 
-const updateTestCatalogBody = {
+const updateTestBody = {
   type: "object",
   properties: {
     name: { type: "string", minLength: 1 },
@@ -43,7 +43,7 @@ const idParam = {
   },
 };
 
-export default async function testCatalogRoutes(fastify) {
+export default async function testRoutes(fastify) {
   const DB_NAME = "testCatalog";
   const COLLECTION = "testCatalog";
 
@@ -72,13 +72,13 @@ export default async function testCatalogRoutes(fastify) {
     };
   }
 
-  // GET /catalogs — list all (optionally filter by categoryId)
+  // GET /test — list all (optionally filter by categoryId)
   fastify.get(
-    "/testCatalogs",
+    "/test",
     {
       schema: {
-        tags: ["TestCatalog"],
-        summary: "List all testCatalogs",
+        tags: ["Test"],
+        summary: "List all tests",
         querystring: {
           type: "object",
           properties: {
@@ -86,7 +86,7 @@ export default async function testCatalogRoutes(fastify) {
           },
         },
         response: {
-          200: { type: "array", items: testCatalogSchema },
+          200: { type: "array", items: testSchema },
         },
       },
     },
@@ -99,21 +99,21 @@ export default async function testCatalogRoutes(fastify) {
         filter.categoryId = oid;
       }
 
-      const testCatalogs = await col().find(filter).toArray();
-      return testCatalogs.map(serialize);
+      const tests = await col().find(filter).toArray();
+      return tests.map(serialize);
     },
   );
 
-  // GET /catalogs/:id — get one
+  // GET /test/:id — get one
   fastify.get(
-    "/testCatalogs/:id",
+    "/test/:id",
     {
       schema: {
-        tags: ["TestCatalog"],
-        summary: "Get a testCatalog by ID",
+        tags: ["Test"],
+        summary: "Get a test by ID",
         params: idParam,
         response: {
-          200: testCatalogSchema,
+          200: testSchema,
           404: { type: "object", properties: { message: { type: "string" } } },
         },
       },
@@ -122,22 +122,22 @@ export default async function testCatalogRoutes(fastify) {
       const oid = toId(request.params.id);
       if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
-      const testCatalog = await col().findOne({ _id: oid });
-      if (!testCatalog) return reply.code(404).send({ message: "TestCatalog not found" });
+      const test = await col().findOne({ _id: oid });
+      if (!test) return reply.code(404).send({ message: "Test not found" });
 
-      return serialize(testCatalog);
+      return serialize(test);
     },
   );
 
-  // POST /catalogs — create
+  // POST /test — create
   fastify.post(
-    "/testCatalogs",
+    "/test",
     {
       schema: {
-        tags: ["TestCatalog"],
-        summary: "Create a new testCatalog",
-        body: createTestCatalogBody,
-        response: { 201: testCatalogSchema },
+        tags: ["Test"],
+        summary: "Create a new test",
+        body: createTestBody,
+        response: { 201: testSchema },
       },
     },
     async (request, reply) => {
@@ -162,17 +162,17 @@ export default async function testCatalogRoutes(fastify) {
     },
   );
 
-  // PATCH /catalogs/:id — update
+  // PATCH /test/:id — update
   fastify.patch(
-    "/testCatalogs/:id",
+    "/test/:id",
     {
       schema: {
-        tags: ["TestCatalog"],
-        summary: "Update a testCatalog",
+        tags: ["Test"],
+        summary: "Update a test",
         params: idParam,
-        body: updateTestCatalogBody,
+        body: updateTestBody,
         response: {
-          200: testCatalogSchema,
+          200: testSchema,
           404: { type: "object", properties: { message: { type: "string" } } },
         },
       },
@@ -206,19 +206,19 @@ export default async function testCatalogRoutes(fastify) {
 
       const result = await col().findOneAndUpdate({ _id: oid }, { $set: updates }, { returnDocument: "after" });
 
-      if (!result) return reply.code(404).send({ message: "TestCatalog not found" });
+      if (!result) return reply.code(404).send({ message: "Test not found" });
 
       return serialize(result);
     },
   );
 
-  // DELETE /catalogs/:id — delete
+  // DELETE /test/:id — delete
   fastify.delete(
-    "/testCatalogs/:id",
+    "/test/:id",
     {
       schema: {
-        tags: ["TestCatalog"],
-        summary: "Delete a testCatalog",
+        tags: ["Test"],
+        summary: "Delete a test",
         params: idParam,
         response: {
           200: { type: "object", properties: { message: { type: "string" } } },
@@ -231,9 +231,9 @@ export default async function testCatalogRoutes(fastify) {
       if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
       const result = await col().deleteOne({ _id: oid });
-      if (result.deletedCount === 0) return reply.code(404).send({ message: "TestCatalog not found" });
+      if (result.deletedCount === 0) return reply.code(404).send({ message: "Test not found" });
 
-      return { message: "TestCatalog deleted successfully" };
+      return { message: "Test deleted successfully" };
     },
   );
 }
