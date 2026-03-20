@@ -6,6 +6,8 @@ import categoryRoutes from "./routes/category/category.js";
 import testRoutes from "./routes/test/test.js";
 import labRoutes from "./routes/lab/lab.js";
 import zoneRoutes from "./routes/zone/zone.js";
+import kingoRoutes from "./routes/kingo/kingo.js";
+import staffRoutes from "./routes/staff/staff.js";
 
 const fastify = Fastify({
   disableRequestLogging: true,
@@ -27,6 +29,8 @@ fastify.register(categoryRoutes, { prefix: "/api" });
 fastify.register(testRoutes, { prefix: "/api" });
 fastify.register(labRoutes, { prefix: "/api" });
 fastify.register(zoneRoutes, { prefix: "/api" });
+fastify.register(staffRoutes, { prefix: "/api" });
+fastify.register(kingoRoutes, { prefix: "/api" });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));
