@@ -1,0 +1,65 @@
+@baseUrl = http://127.0.0.1:5000
+@kingoId = 000000000000000000000001
+
+### List all kingo users
+GET {{baseUrl}}/api/kingo/all
+
+###
+
+### Get one kingo user
+GET {{baseUrl}}/api/kingo/{{kingoId}}
+
+###
+
+### Create a kingo user (regular admin)
+POST {{baseUrl}}/api/kingo
+Content-Type: application/json
+
+{
+  "name": "Jack Sparrow",
+  "username": "jacksparrow",
+  "email": "jack@example.com",
+  "phone": "01700000000",
+  "isActive": true
+}
+
+###
+
+### Create support admin (only one allowed)
+POST {{baseUrl}}/api/kingo/support
+Content-Type: application/json
+
+{
+  "name": "Support Admin",
+  "email": "support@example.com",
+  "phone": "01700000001",
+  "password": "supersecret123"
+}
+
+###
+
+### Update a kingo user
+PATCH {{baseUrl}}/api/kingo/{{kingoId}}
+Content-Type: application/json
+
+{
+  "name": "Jack Sparrow Updated",
+  "username": "jacksparrow2",
+  "email": "jack2@example.com",
+  "phone": "01711111111"
+}
+
+###
+
+### Activate a kingo user
+PATCH {{baseUrl}}/api/kingo/{{kingoId}}/activate
+
+###
+
+### Deactivate a kingo user
+PATCH {{baseUrl}}/api/kingo/{{kingoId}}/deactivate
+
+###
+
+### Delete a kingo user (soft delete)
+DELETE {{baseUrl}}/api/kingo/{{kingoId}}

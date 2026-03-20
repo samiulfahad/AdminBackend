@@ -4,6 +4,8 @@ import Fastify from "fastify";
 import mongoPlugin from "./plugins/mongo.js";
 import categoryRoutes from "./routes/category/category.js";
 import testRoutes from "./routes/test/test.js";
+import labRoutes from "./routes/lab/lab.js";
+import zoneRoutes from "./routes/zone/zone.js";
 
 const fastify = Fastify({
   disableRequestLogging: true,
@@ -21,8 +23,10 @@ const fastify = Fastify({
 await fastify.register(mongoPlugin);
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-await fastify.register(categoryRoutes, { prefix: "/api" });
-await fastify.register(testRoutes, { prefix: "/api" });
+fastify.register(categoryRoutes, { prefix: "/api" });
+fastify.register(testRoutes, { prefix: "/api" });
+fastify.register(labRoutes, { prefix: "/api" });
+fastify.register(zoneRoutes, { prefix: "/api" });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));

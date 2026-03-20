@@ -1,0 +1,35 @@
+@baseUrl = http://127.0.0.1:5000
+@zoneId = 000000000000000000000001
+
+### List all zones
+GET {{baseUrl}}/api/zones/all
+
+###
+
+### Get one zone
+GET {{baseUrl}}/api/zones/{{zoneId}}
+
+###
+
+### Create a zone
+POST {{baseUrl}}/api/zones
+Content-Type: application/json
+
+{
+  "name": "Zone A"
+}
+
+###
+
+### Update a zone
+PATCH {{baseUrl}}/api/zones/{{zoneId}}
+Content-Type: application/json
+
+{
+  "name": "Zone A Updated"
+}
+
+###
+
+### Delete a zone
+DELETE {{baseUrl}}/api/zones/{{zoneId}}
