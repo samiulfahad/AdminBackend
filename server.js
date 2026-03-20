@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import mongoPlugin from "./plugins/mongo.js";
 import categoryRoutes from "./routes/category/category.js";
 import testRoutes from "./routes/test/test.js";
@@ -21,16 +22,22 @@ const fastify = Fastify({
   },
 });
 
+// ── CORS ──────────────────────────────────────────────────────────────────────
+await fastify.register(cors, {
+  origin: process.env.CORS_ORIGIN || "*",
+  methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+});
+
 // ── Plugins ───────────────────────────────────────────────────────────────────
 await fastify.register(mongoPlugin);
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-fastify.register(categoryRoutes, { prefix: "/api" });
-fastify.register(testRoutes, { prefix: "/api" });
-fastify.register(labRoutes, { prefix: "/api" });
-fastify.register(zoneRoutes, { prefix: "/api" });
-fastify.register(staffRoutes, { prefix: "/api" });
-fastify.register(kingoRoutes, { prefix: "/api" });
+fastify.register(categoryRoutes, { prefix: "/api/v1" });
+fastify.register(testRoutes, { prefix: "/api/v1" });
+fastify.register(labRoutes, { prefix: "/api/v1" });
+fastify.register(zoneRoutes, { prefix: "/api/v1" });
+fastify.register(staffRoutes, { prefix: "/api/v1" });
+fastify.register(kingoRoutes, { prefix: "/api/v1" });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));

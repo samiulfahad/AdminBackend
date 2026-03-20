@@ -12,9 +12,7 @@ const OID = {
 const idParam = {
   type: "object",
   additionalProperties: false,
-  properties: {
-    id: OID,
-  },
+  properties: { id: OID },
 };
 
 const createKingoBody = {
@@ -41,13 +39,11 @@ const updateKingoBody = {
   additionalProperties: false,
 };
 
+// Support admin — password only
 const createSupportAdminBody = {
   type: "object",
-  required: ["name", "email", "phone", "password"],
+  required: ["password"],
   properties: {
-    name: { type: "string", minLength: 1 },
-    email: { type: "string", format: "email" },
-    phone: { type: "string", minLength: 1 },
     password: { type: "string", minLength: 6 },
   },
   additionalProperties: false,
@@ -61,7 +57,11 @@ const updateKingoSchema = { tags: ["Kingo"], summary: "Update a kingo user", par
 const activateKingoSchema = { tags: ["Kingo"], summary: "Activate a kingo user", params: idParam };
 const deactivateKingoSchema = { tags: ["Kingo"], summary: "Deactivate a kingo user", params: idParam };
 const deleteKingoSchema = { tags: ["Kingo"], summary: "Delete a kingo user", params: idParam };
-const createSupportAdminSchema = { tags: ["Kingo"], summary: "Create the support admin", body: createSupportAdminBody };
+const createSupportAdminSchema = {
+  tags: ["Kingo"],
+  summary: "Create the support admin (password only)",
+  body: createSupportAdminBody,
+};
 
 // ── Reserved usernames ────────────────────────────────────────────────────────
 const RESERVED_USERNAMES = ["supportadmin"];
@@ -82,21 +82,19 @@ export default async function kingoRoutes(fastify) {
 
   const alive = { isDeleted: { $ne: true } };
 
-  // GET /kingo/all — list all (excludes supportAdmin from general list)
-  fastify.get("/kingo/all", { schema: listKingoSchema }, async (request, reply) => {
+  // GET /kingo/all
+  fastify.get("/kingo/all", { schema: listKingoSchema }, async () => {
     return col()
       .find({ username: { $ne: "supportadmin" }, ...alive })
       .toArray();
   });
 
-  // GET /kingo/:id — get one
+  // GET /kingo/:id
   fastify.get("/kingo/:id", { schema: getKingoSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const user = await col().findOne({ _id: oid, ...alive });
     if (!user) return reply.code(404).send({ message: "Kingo user not found" });
-
     return user;
   });
 
@@ -104,16 +102,15 @@ export default async function kingoRoutes(fastify) {
   fastify.post("/kingo", { schema: createKingoSchema }, async (request, reply) => {
     const { name, username, email, phone, isActive = true } = request.body;
 
-    // block reserved usernames
     if (RESERVED_USERNAMES.includes(username.toLowerCase())) {
-      return reply.code(400).send({ message: `Username "${username}" is reserved and cannot be used` });
+      return reply.code(400).send({ message: `Username "${username}" is reserved` });
     }
-
-    const existingUsername = await col().findOne({ username, ...alive });
-    if (existingUsername) return reply.code(409).send({ message: `Username "${username}" already exists` });
-
-    const existingEmail = await col().findOne({ email, ...alive });
-    if (existingEmail) return reply.code(409).send({ message: `Email "${email}" already exists` });
+    if (await col().findOne({ username, ...alive })) {
+      return reply.code(409).send({ message: `Username "${username}" already exists` });
+    }
+    if (await col().findOne({ email, ...alive })) {
+      return reply.code(409).send({ message: `Email "${email}" already exists` });
+    }
 
     const result = await col().insertOne({
       name,
@@ -129,18 +126,18 @@ export default async function kingoRoutes(fastify) {
     return reply.code(201).send(created);
   });
 
-  // POST /kingo/support — create support admin (only one allowed)
+  // POST /kingo/support — password only, fixed username "supportadmin"
   fastify.post("/kingo/support", { schema: createSupportAdminSchema }, async (request, reply) => {
-    const { name, email, phone, password } = request.body;
+    const { password } = request.body;
 
     const existing = await col().findOne({ username: "supportadmin", ...alive });
     if (existing) return reply.code(409).send({ message: "Support admin already exists" });
 
     const result = await col().insertOne({
-      name,
+      name: "Support Admin",
       username: "supportadmin",
-      email,
-      phone,
+      email: "supportadmin@system",
+      phone: "-",
       password,
       isActive: true,
       isDeleted: false,
@@ -151,10 +148,15 @@ export default async function kingoRoutes(fastify) {
     return reply.code(201).send(created);
   });
 
-  // PATCH /kingo/:id — update
+  // PATCH /kingo/:id
   fastify.patch("/kingo/:id", { schema: updateKingoSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+
+    const target = await col().findOne({ _id: oid, ...alive });
+    if (target?.username === "supportadmin") {
+      return reply.code(403).send({ message: "Support admin cannot be updated via this route" });
+    }
 
     const updates = {};
     const { name, username, email, phone } = request.body;
@@ -163,19 +165,19 @@ export default async function kingoRoutes(fastify) {
     if (phone) updates.phone = phone;
 
     if (username) {
-      // block reserved usernames on update too
       if (RESERVED_USERNAMES.includes(username.toLowerCase())) {
-        return reply.code(400).send({ message: `Username "${username}" is reserved and cannot be used` });
+        return reply.code(400).send({ message: `Username "${username}" is reserved` });
       }
-
-      const existing = await col().findOne({ username, _id: { $ne: oid }, ...alive });
-      if (existing) return reply.code(409).send({ message: `Username "${username}" already exists` });
+      if (await col().findOne({ username, _id: { $ne: oid }, ...alive })) {
+        return reply.code(409).send({ message: `Username "${username}" already exists` });
+      }
       updates.username = username;
     }
 
     if (email) {
-      const existing = await col().findOne({ email, _id: { $ne: oid }, ...alive });
-      if (existing) return reply.code(409).send({ message: `Email "${email}" already exists` });
+      if (await col().findOne({ email, _id: { $ne: oid }, ...alive })) {
+        return reply.code(409).send({ message: `Email "${email}" already exists` });
+      }
       updates.email = email;
     }
 
@@ -183,48 +185,34 @@ export default async function kingoRoutes(fastify) {
       return reply.code(400).send({ message: "Nothing to update" });
     }
 
-    // prevent updating supportAdmin via this route
-    const target = await col().findOne({ _id: oid, ...alive });
-    if (target?.username === "supportadmin") {
-      return reply.code(403).send({ message: "Support admin cannot be updated via this route" });
-    }
-
     const result = await col().findOneAndUpdate({ _id: oid, ...alive }, { $set: updates }, { returnDocument: "after" });
-
     if (!result) return reply.code(404).send({ message: "Kingo user not found" });
-
     return result;
   });
 
-  // PATCH /kingo/:id/activate — activate
+  // PATCH /kingo/:id/activate
   fastify.patch("/kingo/:id/activate", { schema: activateKingoSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().findOneAndUpdate(
       { _id: oid, ...alive },
       { $set: { isActive: true } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Kingo user not found" });
-
     return result;
   });
 
-  // PATCH /kingo/:id/deactivate — deactivate
+  // PATCH /kingo/:id/deactivate
   fastify.patch("/kingo/:id/deactivate", { schema: deactivateKingoSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().findOneAndUpdate(
       { _id: oid, ...alive },
       { $set: { isActive: false } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Kingo user not found" });
-
     return result;
   });
 
@@ -233,7 +221,6 @@ export default async function kingoRoutes(fastify) {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
-    // prevent deleting supportAdmin
     const target = await col().findOne({ _id: oid, ...alive });
     if (target?.username === "supportadmin") {
       return reply.code(403).send({ message: "Support admin cannot be deleted" });
@@ -244,9 +231,7 @@ export default async function kingoRoutes(fastify) {
       { $set: { isDeleted: true, isActive: false } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Kingo user not found" });
-
     return { message: "Kingo user deleted successfully" };
   });
 }

@@ -11,8 +11,15 @@ const OID = {
 const idParam = {
   type: "object",
   additionalProperties: false,
+  properties: { id: OID },
+};
+
+const paginationQuery = {
+  type: "object",
   properties: {
-    id: OID,
+    page: { type: "integer", minimum: 1, default: 1 },
+    limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
+    labID: { type: "string" },
   },
 };
 
@@ -45,12 +52,7 @@ const createLabBody = {
   required: ["name", "labID", "contact", "billing"],
   properties: {
     name: { type: "string", minLength: 1 },
-    labID: {
-      type: "string",
-      minLength: 5,
-      maxLength: 5,
-      pattern: "^[0-9]{5}$",
-    },
+    labID: { type: "string", minLength: 5, maxLength: 5, pattern: "^[0-9]{5}$" },
     contact: contactSchema,
     billing: billingSchema,
     isActive: { type: "boolean", default: true },
@@ -58,43 +60,37 @@ const createLabBody = {
   additionalProperties: false,
 };
 
+// labID is intentionally absent — it cannot be changed after creation
 const updateLabBody = {
   type: "object",
-  properties: {
-    name: { type: "string", minLength: 1 },
-  },
+  properties: { name: { type: "string", minLength: 1 } },
   additionalProperties: false,
 };
 
 const updateContactBody = {
   type: "object",
   required: ["contact"],
-  properties: {
-    contact: contactSchema,
-  },
+  properties: { contact: contactSchema },
   additionalProperties: false,
 };
 
 const updateBillingBody = {
   type: "object",
   required: ["billing"],
-  properties: {
-    billing: billingSchema,
-  },
+  properties: { billing: billingSchema },
   additionalProperties: false,
 };
 
 // ── Route Schemas ─────────────────────────────────────────────────────────────
-const listLabsSchema = { tags: ["Lab"], summary: "List all labs" };
+const listLabsSchema = {
+  tags: ["Lab"],
+  summary: "List labs (paginated, search by labID)",
+  querystring: paginationQuery,
+};
 const getLabSchema = { tags: ["Lab"], summary: "Get a lab by ID", params: idParam };
 const createLabSchema = { tags: ["Lab"], summary: "Create a new lab", body: createLabBody };
-const updateLabSchema = { tags: ["Lab"], summary: "Update lab info", params: idParam, body: updateLabBody };
-const updateContactSchema = {
-  tags: ["Lab"],
-  summary: "Update lab contact info",
-  params: idParam,
-  body: updateContactBody,
-};
+const updateLabSchema = { tags: ["Lab"], summary: "Update lab name", params: idParam, body: updateLabBody };
+const updateContactSchema = { tags: ["Lab"], summary: "Update lab contact", params: idParam, body: updateContactBody };
 const updateBillingSchema = { tags: ["Lab"], summary: "Update lab billing", params: idParam, body: updateBillingBody };
 const activateLabSchema = { tags: ["Lab"], summary: "Activate a lab", params: idParam };
 const deactivateLabSchema = { tags: ["Lab"], summary: "Deactivate a lab", params: idParam };
@@ -114,82 +110,83 @@ export default async function labRoutes(fastify) {
     }
   }
 
-  // GET /labs/all — list all
-  fastify.get("/labs/all", { schema: listLabsSchema }, async (request, reply) => {
-    return col().find({}).toArray();
+  // GET /labs/all
+  fastify.get("/labs/all", { schema: listLabsSchema }, async (request) => {
+    const page = request.query.page ?? 1;
+    const limit = request.query.limit ?? 10;
+    const skip = (page - 1) * limit;
+    const labID = request.query.labID?.trim();
+
+    const filter = labID ? { labID: { $regex: labID, $options: "i" } } : {};
+
+    const [data, total] = await Promise.all([
+      col().find(filter).skip(skip).limit(limit).toArray(),
+      col().countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   });
 
-  // GET /labs/:id — get one
+  // GET /labs/:id
   fastify.get("/labs/:id", { schema: getLabSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const lab = await col().findOne({ _id: oid });
     if (!lab) return reply.code(404).send({ message: "Lab not found" });
-
     return lab;
   });
 
-  // POST /labs — create
+  // POST /labs
   fastify.post("/labs", { schema: createLabSchema }, async (request, reply) => {
     const { name, labID, contact, billing, isActive = true } = request.body;
-
     const existing = await col().findOne({ labID });
     if (existing) return reply.code(409).send({ message: `Lab ID "${labID}" already exists` });
-
     const result = await col().insertOne({ name, labID, contact, billing, isActive });
     const created = await col().findOne({ _id: result.insertedId });
-
     return reply.code(201).send(created);
   });
 
-  // PATCH /labs/:id — update lab info
+  // PATCH /labs/:id — only name is mutable; labID is never touched
   fastify.patch("/labs/:id", { schema: updateLabSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     if (!request.body.name) return reply.code(400).send({ message: "Nothing to update" });
 
+    // Explicitly $set only `name` — labID is never included, even if somehow
+    // passed by a rogue client (additionalProperties: false in the schema
+    // already rejects unknown fields at the Fastify validation layer).
     const result = await col().findOneAndUpdate(
       { _id: oid },
       { $set: { name: request.body.name } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Lab not found" });
-
     return result;
   });
 
-  // PATCH /labs/:id/contact — update contact
+  // PATCH /labs/:id/contact
   fastify.patch("/labs/:id/contact", { schema: updateContactSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().findOneAndUpdate(
       { _id: oid },
       { $set: { contact: request.body.contact } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Lab not found" });
-
     return result;
   });
 
-  // PATCH /labs/:id/billing — update billing
+  // PATCH /labs/:id/billing
   fastify.patch("/labs/:id/billing", { schema: updateBillingSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().findOneAndUpdate(
       { _id: oid },
       { $set: { billing: request.body.billing } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Lab not found" });
-
     return result;
   });
 
@@ -197,15 +194,12 @@ export default async function labRoutes(fastify) {
   fastify.patch("/labs/:id/activate", { schema: activateLabSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().findOneAndUpdate(
       { _id: oid },
       { $set: { isActive: true } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Lab not found" });
-
     return result;
   });
 
@@ -213,15 +207,12 @@ export default async function labRoutes(fastify) {
   fastify.patch("/labs/:id/deactivate", { schema: deactivateLabSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().findOneAndUpdate(
       { _id: oid },
       { $set: { isActive: false } },
       { returnDocument: "after" },
     );
-
     if (!result) return reply.code(404).send({ message: "Lab not found" });
-
     return result;
   });
 
@@ -229,10 +220,8 @@ export default async function labRoutes(fastify) {
   fastify.delete("/labs/:id", { schema: deleteLabSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
     const result = await col().deleteOne({ _id: oid });
     if (result.deletedCount === 0) return reply.code(404).send({ message: "Lab not found" });
-
     return { message: "Lab deleted successfully" };
   });
 }
