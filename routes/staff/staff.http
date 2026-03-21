@@ -1,26 +1,38 @@
 @baseUrl = http://127.0.0.1:5000
-@labId = 000000000000000000000001
+@labId   = 000000000000000000000001
 @staffId = 000000000000000000000002
 
-### List all staff of a lab
+### ── List all staff & admins of a lab ────────────────────────────────────────
 GET {{baseUrl}}/api/labs/{{labId}}/staff
 
 ###
 
-### Get one staff member
-GET {{baseUrl}}/api/staff/{{staffId}}
+### ── Get one staff member by ID ──────────────────────────────────────────────
+GET {{baseUrl}}/api/labs/{{labId}}/staff/{{staffId}}
 
 ###
 
-### Create a staff member for a lab
-POST {{baseUrl}}/api/labs/{{labId}}/staff
+### ── Create a lab admin ───────────────────────────────────────────────────────
+POST {{baseUrl}}/api/labs/{{labId}}/staff/admin
+Content-Type: application/json
+
+{
+  "name": "Dr. Rahim",
+  "phone": "01711000000",
+  "email": "rahim@lab.com",
+  "isActive": true
+}
+
+###
+
+### ── Create a staff member ────────────────────────────────────────────────────
+POST {{baseUrl}}/api/labs/{{labId}}/staff/member
 Content-Type: application/json
 
 {
   "name": "John Doe",
-  "username": "johndoe",
-  "email": "john@example.com",
-  "mobileNumber": "01700000000",
+  "phone": "01700000000",
+  "email": "john@lab.com",
   "permissions": {
     "createInvoice": true,
     "editInvoice": true,
@@ -34,15 +46,24 @@ Content-Type: application/json
 
 ###
 
-### Update a staff member
-PATCH {{baseUrl}}/api/staff/{{staffId}}
+### ── Create support admin (password only) ────────────────────────────────────
+POST {{baseUrl}}/api/labs/{{labId}}/staff/support
+Content-Type: application/json
+
+{
+  "password": "supersecret123"
+}
+
+###
+
+### ── Update a staff member or admin ──────────────────────────────────────────
+PATCH {{baseUrl}}/api/labs/{{labId}}/staff/{{staffId}}
 Content-Type: application/json
 
 {
   "name": "John Doe Updated",
-  "username": "johndoe2",
-  "email": "john2@example.com",
-  "mobileNumber": "01711111111",
+  "phone": "01711111111",
+  "email": "john2@lab.com",
   "permissions": {
     "createInvoice": false,
     "editInvoice": false,
@@ -55,15 +76,15 @@ Content-Type: application/json
 
 ###
 
-### Activate a staff member
-PATCH {{baseUrl}}/api/staff/{{staffId}}/activate
+### ── Activate a staff member ─────────────────────────────────────────────────
+PATCH {{baseUrl}}/api/labs/{{labId}}/staff/{{staffId}}/activate
 
 ###
 
-### Deactivate a staff member
-PATCH {{baseUrl}}/api/staff/{{staffId}}/deactivate
+### ── Deactivate a staff member ───────────────────────────────────────────────
+PATCH {{baseUrl}}/api/labs/{{labId}}/staff/{{staffId}}/deactivate
 
 ###
 
-### Delete a staff member (soft delete)
-DELETE {{baseUrl}}/api/staff/{{staffId}}
+### ── Delete a staff member (soft delete) ─────────────────────────────────────
+DELETE {{baseUrl}}/api/labs/{{labId}}/staff/{{staffId}}

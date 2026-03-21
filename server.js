@@ -7,7 +7,6 @@ import categoryRoutes from "./routes/category/category.js";
 import testRoutes from "./routes/test/test.js";
 import labRoutes from "./routes/lab/lab.js";
 import zoneRoutes from "./routes/zone/zone.js";
-import kingoRoutes from "./routes/kingo/kingo.js";
 import staffRoutes from "./routes/staff/staff.js";
 
 const fastify = Fastify({
@@ -37,7 +36,6 @@ fastify.register(testRoutes, { prefix: "/api/v1" });
 fastify.register(labRoutes, { prefix: "/api/v1" });
 fastify.register(zoneRoutes, { prefix: "/api/v1" });
 fastify.register(staffRoutes, { prefix: "/api/v1" });
-fastify.register(kingoRoutes, { prefix: "/api/v1" });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));

@@ -20,6 +20,7 @@ const paginationQuery = {
     page: { type: "integer", minimum: 1, default: 1 },
     limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
     labID: { type: "string" },
+    zoneId: { type: "string" },
   },
 };
 
@@ -33,6 +34,7 @@ const contactSchema = {
     address: { type: "string" },
     district: { type: "string" },
     zone: { type: "string" },
+    zoneId: { type: "string" }, // stored as plain string
   },
   additionalProperties: false,
 };
@@ -60,10 +62,20 @@ const createLabBody = {
   additionalProperties: false,
 };
 
-// labID is intentionally absent — it cannot be changed after creation
+// labID intentionally absent — cannot be changed after creation
 const updateLabBody = {
   type: "object",
   properties: { name: { type: "string", minLength: 1 } },
+  additionalProperties: false,
+};
+
+// Combined name + contact + zone update (used by the Edit Lab Info modal)
+const updateInfoBody = {
+  type: "object",
+  properties: {
+    name: { type: "string", minLength: 1 },
+    contact: contactSchema, // zoneId travels inside contact
+  },
   additionalProperties: false,
 };
 
@@ -87,9 +99,16 @@ const listLabsSchema = {
   summary: "List labs (paginated, search by labID)",
   querystring: paginationQuery,
 };
+const statsLabSchema = { tags: ["Lab"], summary: "Get lab stats (total, active, inactive, revenue)" };
 const getLabSchema = { tags: ["Lab"], summary: "Get a lab by ID", params: idParam };
 const createLabSchema = { tags: ["Lab"], summary: "Create a new lab", body: createLabBody };
 const updateLabSchema = { tags: ["Lab"], summary: "Update lab name", params: idParam, body: updateLabBody };
+const updateInfoSchema = {
+  tags: ["Lab"],
+  summary: "Update lab name and contact",
+  params: idParam,
+  body: updateInfoBody,
+};
 const updateContactSchema = { tags: ["Lab"], summary: "Update lab contact", params: idParam, body: updateContactBody };
 const updateBillingSchema = { tags: ["Lab"], summary: "Update lab billing", params: idParam, body: updateBillingBody };
 const activateLabSchema = { tags: ["Lab"], summary: "Activate a lab", params: idParam };
@@ -110,6 +129,34 @@ export default async function labRoutes(fastify) {
     }
   }
 
+  // GET /labs/stats
+  fastify.get("/labs/stats", { schema: statsLabSchema }, async () => {
+    const [result] = await col()
+      .aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            active: { $sum: { $cond: ["$isActive", 1, 0] } },
+            inactive: { $sum: { $cond: ["$isActive", 0, 1] } },
+            totalMonthly: { $sum: { $ifNull: ["$billing.monthlyFee", 0] } },
+            totalInvoice: { $sum: { $ifNull: ["$billing.perInvoiceFee", 0] } },
+          },
+        },
+      ])
+      .toArray();
+
+    return result
+      ? {
+          total: result.total,
+          active: result.active,
+          inactive: result.inactive,
+          totalMonthly: result.totalMonthly,
+          totalInvoice: result.totalInvoice,
+        }
+      : { total: 0, active: 0, inactive: 0, totalMonthly: 0, totalInvoice: 0 };
+  });
+
   // GET /labs/all
   fastify.get("/labs/all", { schema: listLabsSchema }, async (request) => {
     const page = request.query.page ?? 1;
@@ -117,10 +164,14 @@ export default async function labRoutes(fastify) {
     const skip = (page - 1) * limit;
     const labID = request.query.labID?.trim();
 
-    const filter = labID ? { labID: { $regex: labID, $options: "i" } } : {};
+    const filter = {};
+    if (labID) filter.labID = { $regex: labID, $options: "i" };
+    if (request.query.zoneId) {
+      filter["contact.zoneId"] = request.query.zoneId; // plain string match
+    }
 
     const [data, total] = await Promise.all([
-      col().find(filter).skip(skip).limit(limit).toArray(),
+      col().find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }).toArray(),
       col().countDocuments(filter),
     ]);
 
@@ -141,25 +192,44 @@ export default async function labRoutes(fastify) {
     const { name, labID, contact, billing, isActive = true } = request.body;
     const existing = await col().findOne({ labID });
     if (existing) return reply.code(409).send({ message: `Lab ID "${labID}" already exists` });
-    const result = await col().insertOne({ name, labID, contact, billing, isActive });
+    const result = await col().insertOne({
+      name,
+      labID,
+      contact, // zoneId lives here as a plain string
+      billing,
+      isActive,
+      createdAt: new Date(),
+    });
     const created = await col().findOne({ _id: result.insertedId });
     return reply.code(201).send(created);
   });
 
-  // PATCH /labs/:id — only name is mutable; labID is never touched
+  // PATCH /labs/:id — name only
   fastify.patch("/labs/:id", { schema: updateLabSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     if (!request.body.name) return reply.code(400).send({ message: "Nothing to update" });
-
-    // Explicitly $set only `name` — labID is never included, even if somehow
-    // passed by a rogue client (additionalProperties: false in the schema
-    // already rejects unknown fields at the Fastify validation layer).
     const result = await col().findOneAndUpdate(
       { _id: oid },
       { $set: { name: request.body.name } },
       { returnDocument: "after" },
     );
+    if (!result) return reply.code(404).send({ message: "Lab not found" });
+    return result;
+  });
+
+  // PATCH /labs/:id/info — name + full contact in one atomic update
+  fastify.patch("/labs/:id/info", { schema: updateInfoSchema }, async (request, reply) => {
+    const oid = toId(request.params.id);
+    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+
+    const $set = {};
+    if (request.body.name) $set.name = request.body.name;
+    if (request.body.contact) $set.contact = request.body.contact; // zoneId is plain string, no conversion
+
+    if (!Object.keys($set).length) return reply.code(400).send({ message: "Nothing to update" });
+
+    const result = await col().findOneAndUpdate({ _id: oid }, { $set }, { returnDocument: "after" });
     if (!result) return reply.code(404).send({ message: "Lab not found" });
     return result;
   });
