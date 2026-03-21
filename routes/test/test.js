@@ -1,6 +1,5 @@
 import { ObjectId } from "@fastify/mongodb";
 
-// ── JSON Schemas ──────────────────────────────────────────────────────────────
 const OID = {
   type: "string",
   minLength: 24,
@@ -18,9 +17,7 @@ const OID_NULLABLE = {
 const idParam = {
   type: "object",
   additionalProperties: false,
-  properties: {
-    id: OID,
-  },
+  properties: { id: OID },
 };
 
 const createTestBody = {
@@ -47,66 +44,34 @@ const updateTestBody = {
 const updateSchemaIdBody = {
   type: "object",
   required: ["schemaId"],
-  properties: {
-    schemaId: OID_NULLABLE,
-  },
+  properties: { schemaId: OID_NULLABLE },
   additionalProperties: false,
 };
 
 const listTestsQuery = {
   type: "object",
-  properties: {
-    categoryId: { type: "string" },
-  },
+  properties: { categoryId: { type: "string" } },
 };
 
-// ── Route Schemas ─────────────────────────────────────────────────────────────
-const listTestsSchema = {
-  tags: ["Test"],
-  summary: "List all tests",
-  querystring: listTestsQuery,
-};
-
-const getTestSchema = {
-  tags: ["Test"],
-  summary: "Get a test by ID",
-  params: idParam,
-};
-
-const createTestSchema = {
-  tags: ["Test"],
-  summary: "Create a new test",
-  body: createTestBody,
-};
-
-const updateTestSchema = {
-  tags: ["Test"],
-  summary: "Update a test",
-  params: idParam,
-  body: updateTestBody,
-};
-
+const listTestsSchema = { tags: ["Test"], summary: "List all tests", querystring: listTestsQuery };
+const getTestSchema = { tags: ["Test"], summary: "Get a test by ID", params: idParam };
+const createTestSchema = { tags: ["Test"], summary: "Create a new test", body: createTestBody };
+const updateTestSchema = { tags: ["Test"], summary: "Update a test", params: idParam, body: updateTestBody };
 const updateSchemaIdSchema = {
   tags: ["Test"],
   summary: "Update schemaId of a test",
   params: idParam,
   body: updateSchemaIdBody,
 };
+const deleteTestSchema = { tags: ["Test"], summary: "Delete a test", params: idParam };
 
-const deleteTestSchema = {
-  tags: ["Test"],
-  summary: "Delete a test",
-  params: idParam,
-};
-
-// ── Routes ────────────────────────────────────────────────────────────────────
 export default async function testRoutes(fastify) {
   function col() {
     return fastify.mongo.db.collection("testCatalog");
   }
 
   function categoryCol() {
-    return fastify.mongo.db.collection("testCategories");
+    return fastify.mongo.db.collection("testCategory");
   }
 
   function toId(id) {
@@ -117,16 +82,7 @@ export default async function testRoutes(fastify) {
     }
   }
 
-  function serialize(doc) {
-    return {
-      ...doc,
-      _id: doc._id.toString(),
-      categoryId: doc.categoryId instanceof ObjectId ? doc.categoryId.toString() : (doc.categoryId ?? null),
-      schemaId: doc.schemaId instanceof ObjectId ? doc.schemaId.toString() : (doc.schemaId ?? null),
-    };
-  }
-
-  // GET /test/all — list all (optionally filter by categoryId)
+  // GET /test/all
   fastify.get("/test/all", { schema: listTestsSchema }, async (request, reply) => {
     const filter = {};
 
@@ -136,11 +92,10 @@ export default async function testRoutes(fastify) {
       filter.categoryId = oid;
     }
 
-    const tests = await col().find(filter).toArray();
-    return tests.map(serialize);
+    return col().find(filter).toArray();
   });
 
-  // GET /test/:id — get one
+  // GET /test/:id
   fastify.get("/test/:id", { schema: getTestSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
@@ -148,10 +103,10 @@ export default async function testRoutes(fastify) {
     const test = await col().findOne({ _id: oid });
     if (!test) return reply.code(404).send({ message: "Test not found" });
 
-    return serialize(test);
+    return test;
   });
 
-  // POST /test — create
+  // POST /test
   fastify.post("/test", { schema: createTestSchema }, async (request, reply) => {
     const { name, categoryId, schemaId } = request.body;
 
@@ -161,19 +116,17 @@ export default async function testRoutes(fastify) {
     const category = await categoryCol().findOne({ _id: catOid });
     if (!category) return reply.code(422).send({ message: `Category "${categoryId}" does not exist` });
 
-    const doc = {
+    const result = await col().insertOne({
       name,
       categoryId: catOid,
       schemaId: schemaId ? toId(schemaId) : null,
-    };
+    });
 
-    const result = await col().insertOne(doc);
     const created = await col().findOne({ _id: result.insertedId });
-
-    return reply.code(201).send(serialize(created));
+    return reply.code(201).send(created);
   });
 
-  // PATCH /test/:id — update
+  // PATCH /test/:id
   fastify.patch("/test/:id", { schema: updateTestSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
@@ -204,29 +157,25 @@ export default async function testRoutes(fastify) {
     const result = await col().findOneAndUpdate({ _id: oid }, { $set: updates }, { returnDocument: "after" });
 
     if (!result) return reply.code(404).send({ message: "Test not found" });
-
-    return serialize(result);
+    return result;
   });
 
-  // PATCH /test/:id/schema — update schemaId only
+  // PATCH /test/:id/schema
   fastify.patch("/test/:id/schema", { schema: updateSchemaIdSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
-    const { schemaId } = request.body;
-
     const result = await col().findOneAndUpdate(
       { _id: oid },
-      { $set: { schemaId: schemaId ? toId(schemaId) : null } },
+      { $set: { schemaId: request.body.schemaId ? toId(request.body.schemaId) : null } },
       { returnDocument: "after" },
     );
 
     if (!result) return reply.code(404).send({ message: "Test not found" });
-
-    return serialize(result);
+    return result;
   });
 
-  // DELETE /test/:id — delete
+  // DELETE /test/:id
   fastify.delete("/test/:id", { schema: deleteTestSchema }, async (request, reply) => {
     const oid = toId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
