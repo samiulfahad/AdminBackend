@@ -1,6 +1,6 @@
 import { ObjectId } from "@fastify/mongodb";
 
-export default async function testSchemaRoutes(fastify) {
+export default async function schemaRoutes(fastify) {
   function col() {
     return fastify.mongo.db.collection("testSchema");
   }
