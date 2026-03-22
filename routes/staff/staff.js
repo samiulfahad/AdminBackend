@@ -8,11 +8,8 @@ const ROLES = {
   SUPPORT_ADMIN: "supportAdmin",
 };
 
-// Sentinel value stored as phone for the support admin.
-// Never a real phone — used to identify & guard the support admin doc.
 const SUPPORT_ADMIN_PHONE = "SUPPORTADMIN";
 
-// All permissions on (admin default) / all off (staff default — customized per person)
 const ALL_PERMISSIONS_ON = {
   createInvoice: true,
   editInvoice: true,
@@ -65,53 +62,62 @@ const permissionsSchema = {
 
 // ── Create bodies ─────────────────────────────────────────────────────────────
 
-// Admin — no permissions field (always all true)
 const createAdminBody = {
   type: "object",
-  required: ["name", "phone"],
+  required: ["name", "phone", "password"],
   properties: {
     name: { type: "string", minLength: 1, maxLength: 100 },
     phone: { type: "string", minLength: 10, maxLength: 15 },
-    email: { type: "string", format: "email" },
+    email: { type: "string", anyOf: [{ format: "email" }, { maxLength: 0 }] },
+    password: { type: "string", minLength: 6, maxLength: 60 },
     isActive: { type: "boolean" },
   },
   additionalProperties: false,
 };
 
-// Staff — permissions required and fully customizable
 const createStaffBody = {
   type: "object",
-  required: ["name", "phone", "permissions"],
+  required: ["name", "phone", "password", "permissions"],
   properties: {
     name: { type: "string", minLength: 1, maxLength: 100 },
     phone: { type: "string", minLength: 10, maxLength: 15 },
-    email: { type: "string", format: "email" },
+    email: { type: "string", anyOf: [{ format: "email" }, { maxLength: 0 }] },
+    password: { type: "string", minLength: 6, maxLength: 60 },
     permissions: permissionsSchema,
     isActive: { type: "boolean" },
   },
   additionalProperties: false,
 };
 
-// Support admin — password only, everything else is fixed
 const createSupportAdminBody = {
   type: "object",
   required: ["password"],
   properties: {
-    password: { type: "string", minLength: 6 },
+    password: { type: "string", minLength: 6, maxLength: 60 },
   },
   additionalProperties: false,
 };
 
-// ── Update body (shared — role cannot be changed after creation) ──────────────
+// ── Update bodies ─────────────────────────────────────────────────────────────
+
 const updateStaffBody = {
   type: "object",
   minProperties: 1,
   properties: {
     name: { type: "string", minLength: 1, maxLength: 100 },
     phone: { type: "string", minLength: 10, maxLength: 15 },
-    email: { type: "string", format: "email" },
+    email: { type: "string", anyOf: [{ format: "email" }, { maxLength: 0 }] },
     permissions: permissionsSchema,
     isActive: { type: "boolean" },
+  },
+  additionalProperties: false,
+};
+
+const updateSupportPasswordBody = {
+  type: "object",
+  required: ["password"],
+  properties: {
+    password: { type: "string", minLength: 6, maxLength: 60 },
   },
   additionalProperties: false,
 };
@@ -131,6 +137,12 @@ const createSupportAdminSchema = {
   summary: "Create the lab support admin",
   params: labIdParam,
   body: createSupportAdminBody,
+};
+const updateSupportPasswordSchema = {
+  tags: ["Staff"],
+  summary: "Update support admin password",
+  params: labIdParam,
+  body: updateSupportPasswordBody,
 };
 const updateStaffSchema = {
   tags: ["Staff"],
@@ -170,68 +182,68 @@ export default async function staffRoutes(fastify) {
     downloadReport: perms.downloadReport ?? false,
   });
 
-  // ── Duplicate checkers (lab-scoped) ───────────────────────────────────────
   const phoneExistsInLab = async (labOid, phone, excludeId = null) => {
-    const query = { labId: labOid, phone, ...alive };
+    const query = { labOid: labOid.toString(), phone, ...alive };
     if (excludeId) query._id = { $ne: excludeId };
     return col().findOne(query, { projection: { _id: 1 } });
   };
 
   const emailExistsInLab = async (labOid, email, excludeId = null) => {
-    const query = { labId: labOid, email, ...alive };
+    const query = { labOid: labOid.toString(), email, ...alive };
     if (excludeId) query._id = { $ne: excludeId };
     return col().findOne(query, { projection: { _id: 1 } });
   };
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
   const resolveLabOrFail = async (rawLabId, reply) => {
     const labOid = toId(rawLabId);
     if (!labOid) {
       reply.code(400).send({ message: "Invalid lab ID format" });
       return null;
     }
-    const lab = await labCol().findOne({ _id: labOid }, { projection: { _id: 1 } });
+    const lab = await labCol().findOne({ _id: labOid }, { projection: { _id: 1, labID: 1 } });
     if (!lab) {
       reply.code(404).send({ message: "Lab not found" });
       return null;
     }
-    return labOid;
+    return { labOid, labID: Number(lab.labID) };
   };
 
   const isSupportAdmin = (doc) => doc?.phone === SUPPORT_ADMIN_PHONE;
 
   // ── GET /labs/:labId/staff ─────────────────────────────────────────────────
-  // Returns all roles except support admin (use separate route if needed)
   fastify.get("/labs/:labId/staff", { schema: listStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
 
     return col()
-      .find({ labId: labOid, phone: { $ne: SUPPORT_ADMIN_PHONE }, ...alive })
-      .sort({ role: 1, name: 1 }) // admins first, then staff — alphabetical within each
+      .find({ labOid: labOid.toString(), ...alive })
+      .sort({ role: 1, name: 1 })
       .toArray();
   });
 
   // ── GET /labs/:labId/staff/:id ─────────────────────────────────────────────
   fastify.get("/labs/:labId/staff/:id", { schema: getStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
 
     const staffOid = toId(request.params.id);
     if (!staffOid) return reply.code(400).send({ message: "Invalid staff ID format" });
 
-    const member = await col().findOne({ _id: staffOid, labId: labOid, ...alive });
+    const member = await col().findOne({ _id: staffOid, labOid: labOid.toString(), ...alive });
     if (!member) return reply.code(404).send({ message: "Staff member not found" });
 
     return member;
   });
 
-  // ── POST /labs/:labId/staff/admin — create lab admin ──────────────────────
+  // ── POST /labs/:labId/staff/admin ──────────────────────────────────────────
   fastify.post("/labs/:labId/staff/admin", { schema: createAdminSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid, labID } = resolved;
 
-    const { name, phone, email, isActive = true } = request.body;
+    const { name, phone, email, password, isActive = true } = request.body;
 
     const normalizedPhone = phone.trim();
     const normalizedEmail = email ? email.toLowerCase().trim() : null;
@@ -247,15 +259,15 @@ export default async function staffRoutes(fastify) {
     }
 
     const doc = {
-      labId: labOid,
+      labOid: labOid.toString(),
+      labId: labID,
       name: name.trim(),
       phone: normalizedPhone,
+      password,
       role: ROLES.ADMIN,
-      permissions: ALL_PERMISSIONS_ON, // admins always get full access
+      permissions: ALL_PERMISSIONS_ON,
       isActive,
       isDeleted: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     };
 
     if (normalizedEmail) doc.email = normalizedEmail;
@@ -265,12 +277,13 @@ export default async function staffRoutes(fastify) {
     return reply.code(201).send(created);
   });
 
-  // ── POST /labs/:labId/staff/member — create staff member ──────────────────
+  // ── POST /labs/:labId/staff/member ─────────────────────────────────────────
   fastify.post("/labs/:labId/staff/member", { schema: createStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid, labID } = resolved;
 
-    const { name, phone, email, permissions, isActive = true } = request.body;
+    const { name, phone, email, password, permissions, isActive = true } = request.body;
 
     const normalizedPhone = phone.trim();
     const normalizedEmail = email ? email.toLowerCase().trim() : null;
@@ -286,15 +299,15 @@ export default async function staffRoutes(fastify) {
     }
 
     const doc = {
-      labId: labOid,
+      labOid: labOid.toString(),
+      labId: labID,
       name: name.trim(),
       phone: normalizedPhone,
+      password,
       role: ROLES.STAFF,
-      permissions: normalizePermissions(permissions), // custom per staff member
+      permissions: normalizePermissions(permissions),
       isActive,
       isDeleted: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     };
 
     if (normalizedEmail) doc.email = normalizedEmail;
@@ -304,44 +317,69 @@ export default async function staffRoutes(fastify) {
     return reply.code(201).send(created);
   });
 
-  // ── POST /labs/:labId/staff/support — create support admin ────────────────
-  // One per lab. Phone is fixed to SUPPORT_ADMIN_PHONE sentinel. Password only.
+  // ── POST /labs/:labId/staff/support ────────────────────────────────────────
   fastify.post("/labs/:labId/staff/support", { schema: createSupportAdminSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid, labID } = resolved;
 
-    // Only one support admin allowed per lab
-    const existing = await col().findOne({ labId: labOid, phone: SUPPORT_ADMIN_PHONE, ...alive });
+    const existing = await col().findOne({ labOid: labOid.toString(), phone: SUPPORT_ADMIN_PHONE, ...alive });
     if (existing) return reply.code(409).send({ message: "Support admin already exists for this lab" });
 
     const { password } = request.body;
 
     const result = await col().insertOne({
-      labId: labOid,
+      labOid: labOid.toString(),
+      labId: labID,
       name: "Support Admin",
-      phone: SUPPORT_ADMIN_PHONE, // sentinel — never a real number
+      phone: SUPPORT_ADMIN_PHONE,
+      password,
       role: ROLES.SUPPORT_ADMIN,
-      permissions: ALL_PERMISSIONS_ON, // full access
-      password, // hash this before storing in your auth layer
+      permissions: ALL_PERMISSIONS_ON,
       isActive: true,
       isDeleted: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     });
 
     const created = await col().findOne({ _id: result.insertedId });
     return reply.code(201).send(created);
   });
 
+  // ── PATCH /labs/:labId/staff/support — update support admin password ───────
+  fastify.patch("/labs/:labId/staff/support", { schema: updateSupportPasswordSchema }, async (request, reply) => {
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
+
+    const support = await col().findOne({
+      labOid: labOid.toString(),
+      phone: SUPPORT_ADMIN_PHONE,
+      ...alive,
+    });
+
+    if (!support) return reply.code(404).send({ message: "Support admin not found for this lab" });
+
+    const { password } = request.body;
+
+    const result = await col().findOneAndUpdate(
+      { _id: support._id },
+      { $set: { password } },
+      { returnDocument: "after" },
+    );
+
+    if (!result) return reply.code(404).send({ message: "Support admin not found" });
+    return { message: "Support admin password updated successfully" };
+  });
+
   // ── PATCH /labs/:labId/staff/:id ───────────────────────────────────────────
   fastify.patch("/labs/:labId/staff/:id", { schema: updateStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
 
     const staffOid = toId(request.params.id);
     if (!staffOid) return reply.code(400).send({ message: "Invalid staff ID format" });
 
-    const existing = await col().findOne({ _id: staffOid, labId: labOid, ...alive });
+    const existing = await col().findOne({ _id: staffOid, labOid: labOid.toString(), ...alive });
     if (!existing) return reply.code(404).send({ message: "Staff member not found" });
 
     if (isSupportAdmin(existing)) {
@@ -349,7 +387,7 @@ export default async function staffRoutes(fastify) {
     }
 
     const { name, phone, email, permissions, isActive } = request.body;
-    const updates = { updatedAt: new Date() };
+    const updates = {};
 
     if (name) updates.name = name.trim();
 
@@ -372,7 +410,6 @@ export default async function staffRoutes(fastify) {
       updates.email = normalized;
     }
 
-    // Permissions update only applies to staff — admins always keep full access
     if (permissions) {
       if (existing.role === ROLES.ADMIN || existing.role === ROLES.SUPPORT_ADMIN) {
         return reply.code(400).send({ message: "Permissions cannot be changed for admins" });
@@ -382,12 +419,12 @@ export default async function staffRoutes(fastify) {
 
     if (isActive !== undefined) updates.isActive = isActive;
 
-    if (Object.keys(updates).length === 1) {
+    if (Object.keys(updates).length === 0) {
       return reply.code(400).send({ message: "Nothing to update" });
     }
 
     const result = await col().findOneAndUpdate(
-      { _id: staffOid, labId: labOid, ...alive },
+      { _id: staffOid, labOid: labOid.toString(), ...alive },
       { $set: updates },
       { returnDocument: "after" },
     );
@@ -398,15 +435,16 @@ export default async function staffRoutes(fastify) {
 
   // ── PATCH /labs/:labId/staff/:id/activate ─────────────────────────────────
   fastify.patch("/labs/:labId/staff/:id/activate", { schema: activateStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
 
     const staffOid = toId(request.params.id);
     if (!staffOid) return reply.code(400).send({ message: "Invalid staff ID format" });
 
     const result = await col().findOneAndUpdate(
-      { _id: staffOid, labId: labOid, ...alive },
-      { $set: { isActive: true, updatedAt: new Date() } },
+      { _id: staffOid, labOid: labOid.toString(), ...alive },
+      { $set: { isActive: true } },
       { returnDocument: "after" },
     );
 
@@ -416,15 +454,16 @@ export default async function staffRoutes(fastify) {
 
   // ── PATCH /labs/:labId/staff/:id/deactivate ───────────────────────────────
   fastify.patch("/labs/:labId/staff/:id/deactivate", { schema: deactivateStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
 
     const staffOid = toId(request.params.id);
     if (!staffOid) return reply.code(400).send({ message: "Invalid staff ID format" });
 
     const result = await col().findOneAndUpdate(
-      { _id: staffOid, labId: labOid, ...alive },
-      { $set: { isActive: false, updatedAt: new Date() } },
+      { _id: staffOid, labOid: labOid.toString(), ...alive },
+      { $set: { isActive: false } },
       { returnDocument: "after" },
     );
 
@@ -434,22 +473,19 @@ export default async function staffRoutes(fastify) {
 
   // ── DELETE /labs/:labId/staff/:id — soft delete ───────────────────────────
   fastify.delete("/labs/:labId/staff/:id", { schema: deleteStaffSchema }, async (request, reply) => {
-    const labOid = await resolveLabOrFail(request.params.labId, reply);
-    if (!labOid) return;
+    const resolved = await resolveLabOrFail(request.params.labId, reply);
+    if (!resolved) return;
+    const { labOid } = resolved;
 
     const staffOid = toId(request.params.id);
     if (!staffOid) return reply.code(400).send({ message: "Invalid staff ID format" });
 
-    const existing = await col().findOne({ _id: staffOid, labId: labOid, ...alive });
+    const existing = await col().findOne({ _id: staffOid, labOid: labOid.toString(), ...alive });
     if (!existing) return reply.code(404).send({ message: "Staff member not found" });
 
-    if (isSupportAdmin(existing)) {
-      return reply.code(403).send({ message: "Support admin cannot be deleted" });
-    }
-
     const result = await col().findOneAndUpdate(
-      { _id: staffOid, labId: labOid, ...alive },
-      { $set: { isDeleted: true, isActive: false, updatedAt: new Date() } },
+      { _id: staffOid, labOid: labOid.toString(), ...alive },
+      { $set: { isDeleted: true, isActive: false } },
       { returnDocument: "after" },
     );
 
