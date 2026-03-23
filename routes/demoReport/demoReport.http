@@ -1,0 +1,44 @@
+@baseUrl = http://127.0.0.1:5000/api/v1
+@schemaId = 69a70bcd2c76412ea1978d18
+@reportId = 69c1489f355f80e0bcad8eda
+
+### GET report by schemaId
+GET {{baseUrl}}/demo-report/69a70bcd2c76412ea1978d18
+Content-Type: application/json
+
+###
+
+### POST - create or replace report by schemaId
+POST {{baseUrl}}/demo-report
+Content-Type: application/json
+
+{
+  "schemaId": "{{schemaId}}",
+  "patientName": "Kingo Pro",
+  "patientAge": "22",
+  "patientGender": "male",
+  "sampleCollectionDate": "2026-03-23",
+  "reportDate": "2026-03-23",
+  "report": {
+    "Section A": {
+      "n1": {
+        "value": "19",
+        "unit": "mmHg",
+        "referenceRange": "1–10"
+      },
+      "__showTitle": true
+    },
+    "Section B": {
+      "Comment": {
+        "value": "Bad"
+      },
+      "__showTitle": false
+    }
+  }
+}
+
+###
+
+### DELETE report by schemaId
+DELETE {{baseUrl}}/demo-report/{{schemaId}}
+Content-Type: application/json

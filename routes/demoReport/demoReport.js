@@ -13,14 +13,11 @@ export default async function demoReportRoutes(fastify) {
     }
   }
 
-  // GET /demo-report/:id
-  fastify.get("/demo-report/:id", async (req, reply) => {
-    const oid = toId(req.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
-    const doc = await col().findOne({ _id: oid });
+  // GET /demo-report/:schemaId  (search by schemaId instead of _id)
+  fastify.get("/demo-report/:schemaId", async (req, reply) => {
+    // console.log(req.params.schemaId);
+    const doc = await col().findOne({ schemaId: req.params.schemaId });
     if (!doc) return reply.code(404).send({ message: "Report not found" });
-
     return doc;
   });
 
@@ -42,14 +39,10 @@ export default async function demoReportRoutes(fastify) {
     return reply.code(200).send(result);
   });
 
-  // DELETE /demo-report/:id
-  fastify.delete("/demo-report/:id", async (req, reply) => {
-    const oid = toId(req.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-
-    const result = await col().deleteOne({ _id: oid });
+  // DELETE /demo-report/:schemaId
+  fastify.delete("/demo-report/:schemaId", async (req, reply) => {
+    const result = await col().deleteOne({ schemaId: req.params.schemaId });
     if (result.deletedCount === 0) return reply.code(404).send({ message: "Report not found" });
-
     return { message: "Report deleted successfully" };
   });
 }

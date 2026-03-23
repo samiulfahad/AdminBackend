@@ -9,7 +9,7 @@ import labRoutes from "./routes/lab/lab.js";
 import zoneRoutes from "./routes/zone/zone.js";
 import staffRoutes from "./routes/staff/staff.js";
 import testSchemaRoutes from "./routes/testSchema/testSchema.js";
-import reportRoutes from "./routes/report/report.js";
+import demoReportRoutes from "./routes/demoReport/demoReport.js";
 
 const fastify = Fastify({
   disableRequestLogging: true,
@@ -39,7 +39,7 @@ fastify.register(labRoutes, { prefix: "/api/v1" });
 fastify.register(zoneRoutes, { prefix: "/api/v1" });
 fastify.register(staffRoutes, { prefix: "/api/v1" });
 fastify.register(testSchemaRoutes, { prefix: "/api/v1" });
-fastify.register(reportRoutes, { prefix: "/api/v1" });
+fastify.register(demoReportRoutes, { prefix: "/api/v1" });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));
