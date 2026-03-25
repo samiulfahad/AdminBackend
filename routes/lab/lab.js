@@ -19,7 +19,7 @@ const paginationQuery = {
   properties: {
     page: { type: "integer", minimum: 1, default: 1 },
     limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
-    labID: { type: "string" },
+    labKey: { type: "string" },
     zoneId: { type: "string" },
   },
 };
@@ -51,10 +51,10 @@ const billingSchema = {
 
 const createLabBody = {
   type: "object",
-  required: ["name", "labID", "contact", "billing"],
+  required: ["name", "labKey", "contact", "billing"],
   properties: {
     name: { type: "string", minLength: 1 },
-    labID: { type: "string", minLength: 5, maxLength: 5, pattern: "^[0-9]{5}$" },
+    labKey: { type: "string", minLength: 5, maxLength: 5, pattern: "^[0-9]{5}$" },
     contact: contactSchema,
     billing: billingSchema,
     isActive: { type: "boolean", default: true },
@@ -62,7 +62,7 @@ const createLabBody = {
   additionalProperties: false,
 };
 
-// labID intentionally absent — cannot be changed after creation
+// labKey intentionally absent — cannot be changed after creation
 const updateLabBody = {
   type: "object",
   properties: { name: { type: "string", minLength: 1 } },
@@ -96,7 +96,7 @@ const updateBillingBody = {
 // ── Route Schemas ─────────────────────────────────────────────────────────────
 const listLabsSchema = {
   tags: ["Lab"],
-  summary: "List labs (paginated, search by labID)",
+  summary: "List labs (paginated, search by labKey)",
   querystring: paginationQuery,
 };
 const statsLabSchema = { tags: ["Lab"], summary: "Get lab stats (total, active, inactive, revenue)" };
@@ -162,10 +162,10 @@ export default async function labRoutes(fastify) {
     const page = request.query.page ?? 1;
     const limit = request.query.limit ?? 10;
     const skip = (page - 1) * limit;
-    const labID = request.query.labID?.trim();
+    const labKey = request.query.labKey?.trim();
 
     const filter = {};
-    if (labID) filter.labID = { $regex: labID, $options: "i" };
+    if (labKey) filter.labKey = { $regex: labKey, $options: "i" };
     if (request.query.zoneId) {
       filter["contact.zoneId"] = request.query.zoneId; // plain string match
     }
@@ -189,12 +189,12 @@ export default async function labRoutes(fastify) {
 
   // POST /labs
   fastify.post("/labs", { schema: createLabSchema }, async (request, reply) => {
-    const { name, labID, contact, billing, isActive = true } = request.body;
-    const existing = await col().findOne({ labID });
-    if (existing) return reply.code(409).send({ message: `Lab ID "${labID}" already exists` });
+    const { name, labKey, contact, billing, isActive = true } = request.body;
+    const existing = await col().findOne({ labKey });
+    if (existing) return reply.code(409).send({ message: `Lab ID "${labKey}" already exists` });
     const result = await col().insertOne({
       name,
-      labID,
+      labKey,
       contact, // zoneId lives here as a plain string
       billing,
       isActive,
