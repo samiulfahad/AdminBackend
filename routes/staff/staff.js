@@ -1,5 +1,6 @@
 // routes/staff.js
 import { ObjectId } from "@fastify/mongodb";
+import bcrypt from "bcryptjs"; // <-- Imported bcryptjs
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ROLES = {
@@ -258,12 +259,15 @@ export default async function staffRoutes(fastify) {
       return reply.code(409).send({ message: `Email "${normalizedEmail}" is already registered in this lab` });
     }
 
+    // Hash the password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
+
     const doc = {
       labOid: labOid.toString(),
       labId: labID,
       name: name.trim(),
       phone: normalizedPhone,
-      password,
+      password: hashedPassword, // <-- Saved hashed password
       role: ROLES.ADMIN,
       permissions: ALL_PERMISSIONS_ON,
       isActive,
@@ -298,12 +302,15 @@ export default async function staffRoutes(fastify) {
       return reply.code(409).send({ message: `Email "${normalizedEmail}" is already registered in this lab` });
     }
 
+    // Hash the password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
+
     const doc = {
       labOid: labOid.toString(),
       labId: labID,
       name: name.trim(),
       phone: normalizedPhone,
-      password,
+      password: hashedPassword, // <-- Saved hashed password
       role: ROLES.STAFF,
       permissions: normalizePermissions(permissions),
       isActive,
@@ -328,12 +335,15 @@ export default async function staffRoutes(fastify) {
 
     const { password } = request.body;
 
+    // Hash the password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
+
     const result = await col().insertOne({
       labOid: labOid.toString(),
       labId: labID,
       name: "Support Admin",
       phone: SUPPORT_ADMIN_PHONE,
-      password,
+      password: hashedPassword, // <-- Saved hashed password
       role: ROLES.SUPPORT_ADMIN,
       permissions: ALL_PERMISSIONS_ON,
       isActive: true,
@@ -360,9 +370,12 @@ export default async function staffRoutes(fastify) {
 
     const { password } = request.body;
 
+    // Hash the new password before updating
+    const hashedPassword = await bcrypt.hash(password, 10);
+
     const result = await col().findOneAndUpdate(
       { _id: support._id },
-      { $set: { password } },
+      { $set: { password: hashedPassword } }, // <-- Saved hashed password
       { returnDocument: "after" },
     );
 
