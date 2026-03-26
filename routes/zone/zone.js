@@ -1,4 +1,4 @@
-import { ObjectId } from "@fastify/mongodb";
+import toObjectId from "../../utils/db.js";
 
 // ── JSON Schemas ──────────────────────────────────────────────────────────────
 const OID = {
@@ -46,13 +46,6 @@ export default async function zoneRoutes(fastify) {
     return fastify.mongo.db.collection("zones");
   }
 
-  function toId(id) {
-    try {
-      return new ObjectId(id);
-    } catch {
-      return null;
-    }
-  }
 
   // GET /zones/all — list all
   fastify.get("/zones/all", { schema: listZonesSchema }, async (request, reply) => {
@@ -61,10 +54,10 @@ export default async function zoneRoutes(fastify) {
 
   // GET /zones/:id — get one
   fastify.get("/zones/:id", { schema: getZoneSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
-    const zone = await col().findOne({ _id: oid });
+    const zone = await col().findOne({ _id: id });
     if (!zone) return reply.code(404).send({ message: "Zone not found" });
 
     return zone;
@@ -85,13 +78,13 @@ export default async function zoneRoutes(fastify) {
 
   // PATCH /zones/:id — update
   fastify.patch("/zones/:id", { schema: updateZoneSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
     if (!request.body.name) return reply.code(400).send({ message: "Nothing to update" });
 
     const result = await col().findOneAndUpdate(
-      { _id: oid },
+      { _id: id },
       { $set: { name: request.body.name } },
       { returnDocument: "after" },
     );
@@ -103,10 +96,10 @@ export default async function zoneRoutes(fastify) {
 
   // DELETE /zones/:id — delete
   fastify.delete("/zones/:id", { schema: deleteZoneSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
-    const result = await col().deleteOne({ _id: oid });
+    const result = await col().deleteOne({ _id: id });
     if (result.deletedCount === 0) return reply.code(404).send({ message: "Zone not found" });
 
     return { message: "Zone deleted successfully" };

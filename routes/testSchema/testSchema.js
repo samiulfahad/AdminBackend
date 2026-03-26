@@ -1,16 +1,8 @@
-import { ObjectId } from "@fastify/mongodb";
+import toObjectId from "../../utils/db.js";
 
 export default async function schemaRoutes(fastify) {
   function col() {
-    return fastify.mongo.db.collection("testSchema");
-  }
-
-  function toId(id) {
-    try {
-      return new ObjectId(id);
-    } catch {
-      return null;
-    }
+    return fastify.mongo.db.collection("testSchemas");
   }
 
   // GET /test-schema/all
@@ -26,10 +18,10 @@ export default async function schemaRoutes(fastify) {
 
   // GET /test-schema/:id
   fastify.get("/test-schema/:id", async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
-    const doc = await col().findOne({ _id: oid });
+    const doc = await col().findOne({ _id: id });
     if (!doc) return reply.code(404).send({ message: "Test schema not found" });
 
     return doc;
@@ -38,21 +30,10 @@ export default async function schemaRoutes(fastify) {
   // POST /test-schema
   fastify.post("/test-schema", async (request, reply) => {
     const body = request.body ?? {};
-
-    const now = new Date();
-    const createdAt = now.toLocaleString("en-BD", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    });
-
     const doc = {
       ...body,
       isActive: body.isActive ?? true,
-      createdAt,
+      createdAt: Date.now()
     };
 
     const result = await col().insertOne(doc);
@@ -62,8 +43,8 @@ export default async function schemaRoutes(fastify) {
 
   // PATCH /test-schema/:id
   fastify.patch("/test-schema/:id", async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
     const { _id, createdAt, ...rest } = request.body ?? {};
 
@@ -79,11 +60,11 @@ export default async function schemaRoutes(fastify) {
 
   // PATCH /test-schema/:id/activate
   fastify.patch("/test-schema/:id/activate", async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
     const result = await col().findOneAndUpdate(
-      { _id: oid },
+      { _id: id },
       { $set: { isActive: true } },
       { returnDocument: "after" },
     );
@@ -94,11 +75,11 @@ export default async function schemaRoutes(fastify) {
 
   // PATCH /test-schema/:id/deactivate
   fastify.patch("/test-schema/:id/deactivate", async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
     const result = await col().findOneAndUpdate(
-      { _id: oid },
+      { _id: id },
       { $set: { isActive: false } },
       { returnDocument: "after" },
     );
@@ -109,10 +90,10 @@ export default async function schemaRoutes(fastify) {
 
   // DELETE /test-schema/:id
   fastify.delete("/test-schema/:id", async (request, reply) => {
-    const oid = toId(request.params.id);
-    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+    const id = toObjectId(request.params.id);
+    if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
-    const result = await col().deleteOne({ _id: oid });
+    const result = await col().deleteOne({ _id: id });
     if (result.deletedCount === 0) return reply.code(404).send({ message: "Test schema not found" });
 
     return { message: "Test schema deleted successfully" };

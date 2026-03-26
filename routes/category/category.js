@@ -1,4 +1,4 @@
-import { ObjectId } from "@fastify/mongodb";
+import toObjectId from "../../utils/db.js";
 
 // JSON Schemas
 const OID = {
@@ -33,127 +33,113 @@ const idParam = {
   },
 };
 
+// ─── Route Schemas ────────────────────────────────────────────────────────────
+
+const listCategoriesSchema = {
+  schema: {
+    tags: ["Category"],
+    summary: "List all categories",
+  },
+};
+
+const getCategoryByIdSchema = {
+  schema: {
+    tags: ["Category"],
+    summary: "Get a category by ID",
+    params: idParam,
+  },
+};
+
+const createCategorySchema = {
+  schema: {
+    tags: ["Category"],
+    summary: "Create a new category",
+    body: createCategoryBody,
+  },
+};
+
+const updateCategorySchema = {
+  schema: {
+    tags: ["Category"],
+    summary: "Update a category",
+    params: idParam,
+    body: updateCategoryBody,
+  },
+};
+
+const deleteCategorySchema = {
+  schema: {
+    tags: ["Category"],
+    summary: "Delete a category",
+    params: idParam,
+  },
+};
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
+
 export default async function categoryRoutes(fastify) {
   function col() {
-    return fastify.mongo.db.collection("testCategory");
-  }
-
-  function toId(id) {
-    try {
-      return new ObjectId(id);
-    } catch {
-      return null;
-    }
+    return fastify.mongo.db.collection("testCategories");
   }
 
   // GET /categories — list all
-  fastify.get(
-    "/categories",
-    {
-      schema: {
-        tags: ["Category"],
-        summary: "List all categories",
-      },
-    },
-    async (request, reply) => {
-      const categories = await col().find({}).toArray();
-      return categories.map((c) => ({ ...c, _id: c._id.toString() }));
-    },
-  );
+  fastify.get("/categories", listCategoriesSchema, async (request, reply) => {
+    const categories = await col().find({}).toArray();
+    return categories.map((c) => ({ ...c, _id: c._id.toString() }));
+  });
 
   // GET /categories/:id — get one
-  fastify.get(
-    "/categories/:id",
-    {
-      schema: {
-        tags: ["Category"],
-        summary: "Get a category by ID",
-        params: idParam,
-      },
-    },
-    async (request, reply) => {
-      const oid = toId(request.params.id);
-      if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+  fastify.get("/categories/:id", getCategoryByIdSchema, async (request, reply) => {
+    const oid = toObjectId(request.params.id);
+    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
-      const category = await col().findOne({ _id: oid });
-      if (!category) return reply.code(404).send({ message: "Category not found" });
+    const category = await col().findOne({ _id: oid });
+    if (!category) return reply.code(404).send({ message: "Category not found" });
 
-      return { ...category, _id: category._id.toString() };
-    },
-  );
+    return { ...category, _id: category._id.toString() };
+  });
 
   // POST /categories — create
-  fastify.post(
-    "/categories",
-    {
-      schema: {
-        tags: ["Category"],
-        summary: "Create a new category",
-        body: createCategoryBody,
-      },
-    },
-    async (request, reply) => {
-      const { name } = request.body;
+  fastify.post("/categories", createCategorySchema, async (request, reply) => {
+    const { name } = request.body;
 
-      const existing = await col().findOne({ name });
-      if (existing) return reply.code(409).send({ message: `Category "${name}" already exists` });
+    const existing = await col().findOne({ name });
+    if (existing) return reply.code(409).send({ message: `Category "${name}" already exists` });
 
-      const result = await col().insertOne({ name });
-      const created = await col().findOne({ _id: result.insertedId });
+    const result = await col().insertOne({ name });
+    const created = await col().findOne({ _id: result.insertedId });
 
-      return reply.code(201).send({ ...created, _id: created._id.toString() });
-    },
-  );
+    return reply.code(201).send({ ...created, _id: created._id.toString() });
+  });
 
   // PATCH /categories/:id — update
-  fastify.patch(
-    "/categories/:id",
-    {
-      schema: {
-        tags: ["Category"],
-        summary: "Update a category",
-        params: idParam,
-        body: updateCategoryBody,
-      },
-    },
-    async (request, reply) => {
-      const oid = toId(request.params.id);
-      if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+  fastify.patch("/categories/:id", updateCategorySchema, async (request, reply) => {
+    const oid = toObjectId(request.params.id);
+    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
-      if (!request.body.name) {
-        return reply.code(400).send({ message: "Nothing to update" });
-      }
+    if (!request.body.name) {
+      return reply.code(400).send({ message: "Nothing to update" });
+    }
 
-      const result = await col().findOneAndUpdate(
-        { _id: oid },
-        { $set: { name: request.body.name } },
-        { returnDocument: "after" },
-      );
+    const result = await col().findOneAndUpdate(
+      { _id: oid },
+      { $set: { name: request.body.name } },
+      { returnDocument: "after" },
+    );
 
-      if (!result) return reply.code(404).send({ message: "Category not found" });
+    if (!result) return reply.code(404).send({ message: "Category not found" });
 
-      return { ...result, _id: result._id.toString() };
-    },
-  );
+    return { ...result, _id: result._id.toString() };
+  });
 
   // DELETE /categories/:id — delete
-  fastify.delete(
-    "/categories/:id",
-    {
-      schema: {
-        tags: ["Category"],
-        summary: "Delete a category",
-        params: idParam,
-      },
-    },
-    async (request, reply) => {
-      const oid = toId(request.params.id);
-      if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
+  fastify.delete("/categories/:id", deleteCategorySchema, async (request, reply) => {
+    const oid = toObjectId(request.params.id);
+    if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
-      const result = await col().deleteOne({ _id: oid });
-      if (result.deletedCount === 0) return reply.code(404).send({ message: "Category not found" });
+    const result = await col().deleteOne({ _id: oid });
+    if (result.deletedCount === 0) return reply.code(404).send({ message: "Category not found" });
 
-      return { message: "Category deleted successfully" };
-    },
-  );
+    return { message: "Category deleted successfully" };
+  });
 }
