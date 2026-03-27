@@ -11,3 +11,4 @@ export default fastifyPlugin(async function (fastify) {
 
   fastify.log.info('MongoDB connected');
 });
+
