@@ -1,4 +1,4 @@
-import { ObjectId } from "@fastify/mongodb";
+import toObjectId from "../../utils/db.js";
 
 // ── JSON Schemas ──────────────────────────────────────────────────────────────
 const OID = {
@@ -20,7 +20,7 @@ const paginationQuery = {
     page: { type: "integer", minimum: 1, default: 1 },
     limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
     labKey: { type: "string" },
-    zoneId: { type: "string" },
+    zoneId: OID, // ← validated as OID string
   },
 };
 
@@ -34,7 +34,7 @@ const contactSchema = {
     address: { type: "string" },
     district: { type: "string" },
     zone: { type: "string" },
-    zoneId: { type: "string" }, // stored as plain string
+    zoneId: OID, // ← validated as OID string (converted to ObjectId before save)
   },
   additionalProperties: false,
 };
@@ -62,19 +62,17 @@ const createLabBody = {
   additionalProperties: false,
 };
 
-// labKey intentionally absent — cannot be changed after creation
 const updateLabBody = {
   type: "object",
   properties: { name: { type: "string", minLength: 1 } },
   additionalProperties: false,
 };
 
-// Combined name + contact + zone update (used by the Edit Lab Info modal)
 const updateInfoBody = {
   type: "object",
   properties: {
     name: { type: "string", minLength: 1 },
-    contact: contactSchema, // zoneId travels inside contact
+    contact: contactSchema,
   },
   additionalProperties: false,
 };
@@ -92,6 +90,19 @@ const updateBillingBody = {
   properties: { billing: billingSchema },
   additionalProperties: false,
 };
+
+// ── Helper ────────────────────────────────────────────────────────────────────
+// Converts contact.zoneId string → ObjectId (mutates a shallow copy)
+function normalizeContact(contact) {
+  if (!contact) return contact;
+  const c = { ...contact };
+  if (c.zoneId) {
+    const oid = toObjectId(c.zoneId);
+    if (!oid) throw { statusCode: 400, message: "Invalid zoneId format" };
+    c.zoneId = oid; // ← stored as ObjectId
+  }
+  return c;
+}
 
 // ── Route Schemas ─────────────────────────────────────────────────────────────
 const listLabsSchema = {
@@ -119,14 +130,6 @@ const deleteLabSchema = { tags: ["Lab"], summary: "Delete a lab", params: idPara
 export default async function labRoutes(fastify) {
   function col() {
     return fastify.mongo.db.collection("labs");
-  }
-
-  function toId(id) {
-    try {
-      return new ObjectId(id);
-    } catch {
-      return null;
-    }
   }
 
   // GET /labs/stats
@@ -167,7 +170,9 @@ export default async function labRoutes(fastify) {
     const filter = {};
     if (labKey) filter.labKey = { $regex: labKey, $options: "i" };
     if (request.query.zoneId) {
-      filter["contact.zoneId"] = request.query.zoneId; // plain string match
+      const zoneOid = toObjectId(request.query.zoneId); // ← query as ObjectId
+      if (!zoneOid) return reply.code(400).send({ message: "Invalid zoneId format" });
+      filter["contact.zoneId"] = zoneOid;
     }
 
     const [data, total] = await Promise.all([
@@ -180,7 +185,7 @@ export default async function labRoutes(fastify) {
 
   // GET /labs/:id
   fastify.get("/labs/:id", { schema: getLabSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     const lab = await col().findOne({ _id: oid });
     if (!lab) return reply.code(404).send({ message: "Lab not found" });
@@ -189,24 +194,27 @@ export default async function labRoutes(fastify) {
 
   // POST /labs
   fastify.post("/labs", { schema: createLabSchema }, async (request, reply) => {
-    const { name, labKey, contact, billing, isActive = true } = request.body;
+    const { name, labKey, billing, isActive = true } = request.body;
+
+    let contact;
+    try {
+      contact = normalizeContact(request.body.contact);
+    } catch (e) {
+      // ← zoneId → ObjectId
+      return reply.code(400).send({ message: e.message });
+    }
+
     const existing = await col().findOne({ labKey });
     if (existing) return reply.code(409).send({ message: `Lab ID "${labKey}" already exists` });
-    const result = await col().insertOne({
-      name,
-      labKey,
-      contact, // zoneId lives here as a plain string
-      billing,
-      isActive,
-      createdAt: new Date(),
-    });
+
+    const result = await col().insertOne({ name, labKey, contact, billing, isActive, createdAt: new Date() });
     const created = await col().findOne({ _id: result.insertedId });
     return reply.code(201).send(created);
   });
 
   // PATCH /labs/:id — name only
   fastify.patch("/labs/:id", { schema: updateLabSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     if (!request.body.name) return reply.code(400).send({ message: "Nothing to update" });
     const result = await col().findOneAndUpdate(
@@ -218,14 +226,21 @@ export default async function labRoutes(fastify) {
     return result;
   });
 
-  // PATCH /labs/:id/info — name + full contact in one atomic update
+  // PATCH /labs/:id/info — name + full contact
   fastify.patch("/labs/:id/info", { schema: updateInfoSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
     const $set = {};
     if (request.body.name) $set.name = request.body.name;
-    if (request.body.contact) $set.contact = request.body.contact; // zoneId is plain string, no conversion
+    if (request.body.contact) {
+      try {
+        $set.contact = normalizeContact(request.body.contact);
+      } catch (e) {
+        // ← zoneId → ObjectId
+        return reply.code(400).send({ message: e.message });
+      }
+    }
 
     if (!Object.keys($set).length) return reply.code(400).send({ message: "Nothing to update" });
 
@@ -236,20 +251,25 @@ export default async function labRoutes(fastify) {
 
   // PATCH /labs/:id/contact
   fastify.patch("/labs/:id/contact", { schema: updateContactSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
-    const result = await col().findOneAndUpdate(
-      { _id: oid },
-      { $set: { contact: request.body.contact } },
-      { returnDocument: "after" },
-    );
+
+    let contact;
+    try {
+      contact = normalizeContact(request.body.contact);
+    } catch (e) {
+      // ← zoneId → ObjectId
+      return reply.code(400).send({ message: e.message });
+    }
+
+    const result = await col().findOneAndUpdate({ _id: oid }, { $set: { contact } }, { returnDocument: "after" });
     if (!result) return reply.code(404).send({ message: "Lab not found" });
     return result;
   });
 
   // PATCH /labs/:id/billing
   fastify.patch("/labs/:id/billing", { schema: updateBillingSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     const result = await col().findOneAndUpdate(
       { _id: oid },
@@ -262,7 +282,7 @@ export default async function labRoutes(fastify) {
 
   // PATCH /labs/:id/activate
   fastify.patch("/labs/:id/activate", { schema: activateLabSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     const result = await col().findOneAndUpdate(
       { _id: oid },
@@ -275,7 +295,7 @@ export default async function labRoutes(fastify) {
 
   // PATCH /labs/:id/deactivate
   fastify.patch("/labs/:id/deactivate", { schema: deactivateLabSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     const result = await col().findOneAndUpdate(
       { _id: oid },
@@ -288,7 +308,7 @@ export default async function labRoutes(fastify) {
 
   // DELETE /labs/:id
   fastify.delete("/labs/:id", { schema: deleteLabSchema }, async (request, reply) => {
-    const oid = toId(request.params.id);
+    const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
     const result = await col().deleteOne({ _id: oid });
     if (result.deletedCount === 0) return reply.code(404).send({ message: "Lab not found" });

@@ -12,7 +12,10 @@ export default async function schemaRoutes(fastify) {
 
   // GET /test-schema/by-test/:testId
   fastify.get("/test-schema/by-test/:testId", async (request, reply) => {
-    const docs = await col().find({ testId: request.params.testId }).sort({ createdAt: -1 }).toArray();
+    const testId = toObjectId(request.params.testId);
+    if (!testId) return reply.code(400).send({ message: "Invalid testId format" });
+
+    const docs = await col().find({ testId }).sort({ createdAt: -1 }).toArray();
     return docs;
   });
 
@@ -33,7 +36,7 @@ export default async function schemaRoutes(fastify) {
     const doc = {
       ...body,
       isActive: body.isActive ?? true,
-      createdAt: Date.now()
+      createdAt: Date.now(),
     };
 
     const result = await col().insertOne(doc);
@@ -52,7 +55,13 @@ export default async function schemaRoutes(fastify) {
       return reply.code(400).send({ message: "Nothing to update" });
     }
 
-    const result = await col().findOneAndUpdate({ _id: oid }, { $set: rest }, { returnDocument: "after" });
+    if (rest.testId) {
+      const testOid = toObjectId(rest.testId);
+      if (!testOid) return reply.code(400).send({ message: "Invalid testId format" });
+      rest.testId = testOid;
+    }
+
+    const result = await col().findOneAndUpdate({ _id: id }, { $set: rest }, { returnDocument: "after" });
 
     if (!result) return reply.code(404).send({ message: "Test schema not found" });
     return result;
@@ -63,11 +72,7 @@ export default async function schemaRoutes(fastify) {
     const id = toObjectId(request.params.id);
     if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
-    const result = await col().findOneAndUpdate(
-      { _id: id },
-      { $set: { isActive: true } },
-      { returnDocument: "after" },
-    );
+    const result = await col().findOneAndUpdate({ _id: id }, { $set: { isActive: true } }, { returnDocument: "after" });
 
     if (!result) return reply.code(404).send({ message: "Test schema not found" });
     return result;

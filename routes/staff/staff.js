@@ -1,4 +1,3 @@
-import { ObjectId } from "@fastify/mongodb";
 import bcrypt from "bcryptjs";
 import toObjectId from "../../utils/db.js";
 
@@ -211,7 +210,7 @@ export default async function staffRoutes(fastify) {
       return null;
     }
 
-    return { _id: oid.toString(), labKey: Number(lab.labKey) };
+    return { _id: oid, labKey: Number(lab.labKey) }; // ← _id stored as ObjectId, not string
   };
 
   const phoneExistsInLab = (labId, phone, excludeId = null) => {
@@ -265,7 +264,7 @@ export default async function staffRoutes(fastify) {
       return reply.code(409).send({ message: `Email "${nEmail}" is already registered in this lab` });
 
     const doc = {
-      labId: lab._id,
+      labId: lab._id, // ← stored as ObjectId
       labKey: lab.labKey,
       name: name.trim(),
       phone: nPhone,
@@ -273,11 +272,7 @@ export default async function staffRoutes(fastify) {
       role: ROLES.ADMIN,
       permissions: ALL_PERMISSIONS_ON,
       isActive,
-      deletion: {
-        status: false,
-        at: null,
-        by: null,
-      },
+      deletion: { status: false, at: null, by: null },
       created: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
     };
     if (nEmail) doc.email = nEmail;
@@ -302,7 +297,7 @@ export default async function staffRoutes(fastify) {
       return reply.code(409).send({ message: `Email "${nEmail}" is already registered in this lab` });
 
     const doc = {
-      labId: lab._id,
+      labId: lab._id, // ← stored as ObjectId
       labKey: lab.labKey,
       name: name.trim(),
       phone: nPhone,
@@ -310,14 +305,11 @@ export default async function staffRoutes(fastify) {
       role: ROLES.STAFF,
       permissions: normalizePermissions(permissions),
       isActive,
-      deletion: {
-        status: false,
-        at: null,
-        by: null,
-      },
+      deletion: { status: false, at: null, by: null },
       created: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
     };
     if (nEmail) doc.email = nEmail;
+
     const result = await col().insertOne(doc);
     return reply.code(201).send(await col().findOne({ _id: result.insertedId }));
   });
@@ -331,7 +323,7 @@ export default async function staffRoutes(fastify) {
       return reply.code(409).send({ message: "Support admin already exists for this lab" });
 
     const result = await col().insertOne({
-      labId: lab._id,
+      labId: lab._id, // ← stored as ObjectId
       labKey: lab.labKey,
       name: "Support Admin",
       phone: SUPPORT_ADMIN_PHONE,
@@ -339,11 +331,7 @@ export default async function staffRoutes(fastify) {
       role: ROLES.SUPPORT_ADMIN,
       permissions: ALL_PERMISSIONS_ON,
       isActive: true,
-      deletion: {
-        status: false,
-        at: null,
-        by: null,
-      },
+      deletion: { status: false, at: null, by: null },
       created: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
     });
 
@@ -390,7 +378,7 @@ export default async function staffRoutes(fastify) {
     const lab = await resolveLab(req.params.labId, reply);
     if (!lab) return;
 
-    const staffId = toObjectId (req.params.id);
+    const staffId = toObjectId(req.params.id);
     if (!staffId) return reply.code(400).send({ message: "Invalid staff ID format" });
 
     const existing = await col().findOne({ _id: staffId, labId: lab._id, ...alive });
@@ -428,14 +416,9 @@ export default async function staffRoutes(fastify) {
 
     if (Object.keys(updates).length === 0) return reply.code(400).send({ message: "Nothing to update" });
 
-    const setData = {
-      ...updates,
-      updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
-    };
-
     const result = await col().findOneAndUpdate(
       { _id: staffId, labId: lab._id, ...alive },
-      { $set: setData },
+      { $set: { ...updates, updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } } } },
       { returnDocument: "after" },
     );
 
@@ -448,17 +431,12 @@ export default async function staffRoutes(fastify) {
     const lab = await resolveLab(req.params.labId, reply);
     if (!lab) return;
 
-    const staffId = toObjectId (req.params.id);
+    const staffId = toObjectId(req.params.id);
     if (!staffId) return reply.code(400).send({ message: "Invalid staff ID format" });
 
     const result = await col().findOneAndUpdate(
       { _id: staffId, labId: lab._id, ...alive },
-      {
-        $set: {
-          isActive: true,
-          updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
-        },
-      },
+      { $set: { isActive: true, updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } } } },
       { returnDocument: "after" },
     );
 
@@ -471,17 +449,12 @@ export default async function staffRoutes(fastify) {
     const lab = await resolveLab(req.params.labId, reply);
     if (!lab) return;
 
-    const staffId = toObjectId (req.params.id);
+    const staffId = toObjectId(req.params.id);
     if (!staffId) return reply.code(400).send({ message: "Invalid staff ID format" });
 
     const result = await col().findOneAndUpdate(
       { _id: staffId, labId: lab._id, ...alive },
-      {
-        $set: {
-          isActive: false,
-          updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
-        },
-      },
+      { $set: { isActive: false, updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } } } },
       { returnDocument: "after" },
     );
 
@@ -494,7 +467,7 @@ export default async function staffRoutes(fastify) {
     const lab = await resolveLab(req.params.labId, reply);
     if (!lab) return;
 
-    const staffId = toObjectId (req.params.id);
+    const staffId = toObjectId(req.params.id);
     if (!staffId) return reply.code(400).send({ message: "Invalid staff ID format" });
 
     const existing = await col().findOne({ _id: staffId, labId: lab._id, ...alive });
@@ -506,11 +479,7 @@ export default async function staffRoutes(fastify) {
       { _id: staffId, labId: lab._id, ...alive },
       {
         $set: {
-          deletion: {
-            status: true,
-            at: Date.now(),
-            by: { id: null, name: "SYSTEM ADMIN" },
-          },
+          deletion: { status: true, at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
           updated: { at: Date.now(), by: { id: null, name: "SYSTEM ADMIN" } },
         },
       },

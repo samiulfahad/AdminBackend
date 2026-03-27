@@ -79,10 +79,10 @@ export default async function testRoutes(fastify) {
     const filter = {};
 
     if (request.query.categoryId) {
-      filter.categoryId = request.query.categoryId; // ← fixed + simplified (string)
+      filter.categoryId = toObjectId(request.query.categoryId);
     }
-
-    return col().find(filter).toArray();
+    const result = await col().find(filter).toArray();
+    return result;
   });
 
   // GET /test/:id
@@ -100,14 +100,19 @@ export default async function testRoutes(fastify) {
   fastify.post("/test", { schema: createTestSchema }, async (request, reply) => {
     const { name, categoryId, schemaId } = request.body;
 
-    // category existence check (still needs ObjectId because category collection uses _id as ObjectId)
-    const category = await categoryCol().findOne({ _id: toObjectId(categoryId) });
+    const categoryOid = toObjectId(categoryId);
+    if (!categoryOid) return reply.code(400).send({ message: "Invalid categoryId format" });
+
+    const category = await categoryCol().findOne({ _id: categoryOid });
     if (!category) return reply.code(422).send({ message: `Category "${categoryId}" does not exist` });
+
+    const schemaOid = schemaId ? toObjectId(schemaId) : null;
+    if (schemaId && !schemaOid) return reply.code(400).send({ message: "Invalid schemaId format" });
 
     const result = await col().insertOne({
       name,
-      categoryId, // ← stored as string
-      schemaId: schemaId ?? null, // cleaner than ternary
+      categoryId: categoryOid,   // ← stored as ObjectId
+      schemaId: schemaOid,        // ← stored as ObjectId or null
     });
 
     const created = await col().findOne({ _id: result.insertedId });
@@ -125,17 +130,20 @@ export default async function testRoutes(fastify) {
     if (name) updates.name = name;
 
     if (categoryId !== undefined) {
-      const catId = toObjectId(categoryId);
-      if (!catId) return reply.code(400).send({ message: "Invalid categoryId format" });
+      const categoryOid = toObjectId(categoryId);
+      if (!categoryOid) return reply.code(400).send({ message: "Invalid categoryId format" });
 
-      const category = await categoryCol().findOne({ _id: catId });
+      const category = await categoryCol().findOne({ _id: categoryOid });
       if (!category) return reply.code(422).send({ message: `Category "${categoryId}" does not exist` });
 
-      updates.categoryId = categoryId; // ← stored as string
+      updates.categoryId = categoryOid;   // ← stored as ObjectId
     }
 
     if (schemaId !== undefined) {
-      updates.schemaId = schemaId ?? null;
+      const schemaOid = schemaId ? toObjectId(schemaId) : null;
+      if (schemaId && !schemaOid) return reply.code(400).send({ message: "Invalid schemaId format" });
+
+      updates.schemaId = schemaOid;       // ← stored as ObjectId or null
     }
 
     if (Object.keys(updates).length === 0) {
@@ -153,9 +161,13 @@ export default async function testRoutes(fastify) {
     const id = toObjectId(request.params.id);
     if (!id) return reply.code(400).send({ message: "Invalid ID format" });
 
+    const { schemaId } = request.body;
+    const schemaOid = schemaId ? toObjectId(schemaId) : null;
+    if (schemaId && !schemaOid) return reply.code(400).send({ message: "Invalid schemaId format" });
+
     const result = await col().findOneAndUpdate(
       { _id: id },
-      { $set: { schemaId: request.body.schemaId ?? null } },
+      { $set: { schemaId: schemaOid } },  // ← stored as ObjectId or null
       { returnDocument: "after" },
     );
 
