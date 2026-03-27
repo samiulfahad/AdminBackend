@@ -2,8 +2,7 @@ import fastifyPlugin from "fastify-plugin";
 import mongodb from "@fastify/mongodb";
 
 export default fastifyPlugin(async function (fastify) {
-  const mongoUri = process.env.CLOUD_DB
- console.log("CLOUD_DB →", process.env.CLOUD_DB); // 
+  const mongoUri = process.env.MONGODB_URI
   await fastify.register(mongodb, {
     forceClose: true,
     url: mongoUri,
