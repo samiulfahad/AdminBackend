@@ -27,7 +27,7 @@ const fastify = Fastify({
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 await fastify.register(cors, {
-  origin: ["https://lpadmin.netlify.app"],
+  origin: ["https://lpadmin.netlify.app", "http://localhost:5173"],
   methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
 });
 
