@@ -20,7 +20,7 @@ const paginationQuery = {
     page: { type: "integer", minimum: 1, default: 1 },
     limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
     labKey: { type: "string" },
-    zoneId: OID, // ← validated as OID string
+    zoneId: OID,
   },
 };
 
@@ -34,7 +34,7 @@ const contactSchema = {
     address: { type: "string" },
     district: { type: "string" },
     zone: { type: "string" },
-    zoneId: OID, // ← validated as OID string (converted to ObjectId before save)
+    zoneId: OID,
   },
   additionalProperties: false,
 };
@@ -55,6 +55,8 @@ const createLabBody = {
   properties: {
     name: { type: "string", minLength: 1 },
     labKey: { type: "string", minLength: 5, maxLength: 5, pattern: "^[0-9]{5}$" },
+    type: { type: "string", enum: ["diagnostic", "hospital"] },
+    registrationNumber: { type: "string" },
     contact: contactSchema,
     billing: billingSchema,
     isActive: { type: "boolean", default: true },
@@ -72,6 +74,8 @@ const updateInfoBody = {
   type: "object",
   properties: {
     name: { type: "string", minLength: 1 },
+    type: { type: "string", enum: ["diagnostic", "hospital"] },
+    registrationNumber: { type: "string" },
     contact: contactSchema,
   },
   additionalProperties: false,
@@ -92,14 +96,13 @@ const updateBillingBody = {
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
-// Converts contact.zoneId string → ObjectId (mutates a shallow copy)
 function normalizeContact(contact) {
   if (!contact) return contact;
   const c = { ...contact };
   if (c.zoneId) {
     const oid = toObjectId(c.zoneId);
     if (!oid) throw { statusCode: 400, message: "Invalid zoneId format" };
-    c.zoneId = oid; // ← stored as ObjectId
+    c.zoneId = oid;
   }
   return c;
 }
@@ -116,7 +119,7 @@ const createLabSchema = { tags: ["Lab"], summary: "Create a new lab", body: crea
 const updateLabSchema = { tags: ["Lab"], summary: "Update lab name", params: idParam, body: updateLabBody };
 const updateInfoSchema = {
   tags: ["Lab"],
-  summary: "Update lab name and contact",
+  summary: "Update lab name, type, registrationNumber and contact",
   params: idParam,
   body: updateInfoBody,
 };
@@ -161,7 +164,7 @@ export default async function labRoutes(fastify) {
   });
 
   // GET /labs/all
-  fastify.get("/labs/all", { schema: listLabsSchema }, async (request) => {
+  fastify.get("/labs/all", { schema: listLabsSchema }, async (request, reply) => {
     const page = request.query.page ?? 1;
     const limit = request.query.limit ?? 10;
     const skip = (page - 1) * limit;
@@ -170,7 +173,7 @@ export default async function labRoutes(fastify) {
     const filter = {};
     if (labKey) filter.labKey = { $regex: labKey, $options: "i" };
     if (request.query.zoneId) {
-      const zoneOid = toObjectId(request.query.zoneId); // ← query as ObjectId
+      const zoneOid = toObjectId(request.query.zoneId);
       if (!zoneOid) return reply.code(400).send({ message: "Invalid zoneId format" });
       filter["contact.zoneId"] = zoneOid;
     }
@@ -194,20 +197,30 @@ export default async function labRoutes(fastify) {
 
   // POST /labs
   fastify.post("/labs", { schema: createLabSchema }, async (request, reply) => {
-    const { name, labKey, billing, isActive = true } = request.body;
+    const { name, labKey, type, registrationNumber, billing, isActive = true } = request.body;
 
     let contact;
     try {
       contact = normalizeContact(request.body.contact);
     } catch (e) {
-      // ← zoneId → ObjectId
       return reply.code(400).send({ message: e.message });
     }
 
     const existing = await col().findOne({ labKey });
     if (existing) return reply.code(409).send({ message: `Lab ID "${labKey}" already exists` });
 
-    const result = await col().insertOne({ name, labKey, contact, billing, isActive, createdAt: new Date() });
+    const doc = {
+      name,
+      labKey,
+      type: type ?? null,
+      registrationNumber: registrationNumber ?? null,
+      contact,
+      billing,
+      isActive,
+      createdAt: new Date(),
+    };
+
+    const result = await col().insertOne(doc);
     const created = await col().findOne({ _id: result.insertedId });
     return reply.code(201).send(created);
   });
@@ -226,18 +239,28 @@ export default async function labRoutes(fastify) {
     return result;
   });
 
-  // PATCH /labs/:id/info — name + full contact
+  // PATCH /labs/:id/info — name + type + registrationNumber + full contact
   fastify.patch("/labs/:id/info", { schema: updateInfoSchema }, async (request, reply) => {
     const oid = toObjectId(request.params.id);
     if (!oid) return reply.code(400).send({ message: "Invalid ID format" });
 
     const $set = {};
     if (request.body.name) $set.name = request.body.name;
+
+    // type: allow clearing by sending null / empty string
+    if ("type" in request.body) {
+      $set.type = request.body.type || null;
+    }
+
+    // registrationNumber: allow clearing by sending null / empty string
+    if ("registrationNumber" in request.body) {
+      $set.registrationNumber = request.body.registrationNumber || null;
+    }
+
     if (request.body.contact) {
       try {
         $set.contact = normalizeContact(request.body.contact);
       } catch (e) {
-        // ← zoneId → ObjectId
         return reply.code(400).send({ message: e.message });
       }
     }
@@ -258,7 +281,6 @@ export default async function labRoutes(fastify) {
     try {
       contact = normalizeContact(request.body.contact);
     } catch (e) {
-      // ← zoneId → ObjectId
       return reply.code(400).send({ message: e.message });
     }
 
