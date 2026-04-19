@@ -10,6 +10,8 @@ import zoneRoutes from "./routes/zone/zone.js";
 import staffRoutes from "./routes/staff/staff.js";
 import testSchemaRoutes from "./routes/testSchema/testSchema.js";
 import demoReportRoutes from "./routes/demoReport/demoReport.js";
+import billingRoutes from "./routes/billing/billing.js";
+import { ensureIndexes } from "./db/indexes.js";
 
 const fastify = Fastify({
   disableRequestLogging: true,
@@ -23,8 +25,6 @@ const fastify = Fastify({
   },
 });
 
-
-
 // ── CORS ──────────────────────────────────────────────────────────────────────
 await fastify.register(cors, {
   origin: ["https://lpadmin.netlify.app", "http://localhost:5173"],
@@ -34,17 +34,26 @@ await fastify.register(cors, {
 // ── Plugins ───────────────────────────────────────────────────────────────────
 await fastify.register(mongoPlugin);
 
-
-
+// ── DB indexes ────────────────────────────────────────────────────────────────
+try {
+  await ensureIndexes(fastify.mongo.db);
+  fastify.log.info("DB indexes ensured");
+} catch (err) {
+  fastify.log.error({ err }, "Could not ensure DB indexes — aborting");
+  process.exit(1);
+}
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-fastify.register(categoryRoutes, { prefix: "/api/v1" });
-fastify.register(testRoutes, { prefix: "/api/v1" });
-fastify.register(labRoutes, { prefix: "/api/v1" });
-fastify.register(zoneRoutes, { prefix: "/api/v1" });
-fastify.register(staffRoutes, { prefix: "/api/v1" });
-fastify.register(testSchemaRoutes, { prefix: "/api/v1" });
-fastify.register(demoReportRoutes, { prefix: "/api/v1" });
+const API = "/api/v1";
+
+fastify.register(categoryRoutes, { prefix: API });
+fastify.register(testRoutes, { prefix: API });
+fastify.register(labRoutes, { prefix: API });
+fastify.register(zoneRoutes, { prefix: API });
+fastify.register(staffRoutes, { prefix: API });
+fastify.register(testSchemaRoutes, { prefix: API });
+fastify.register(demoReportRoutes, { prefix: API });
+fastify.register(billingRoutes, { prefix: API });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));
