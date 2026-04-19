@@ -1,3 +1,0 @@
-
-
-01. rename collection name testCategory => testCategories
