@@ -188,10 +188,30 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
+        const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
         const options = { triggeredBy: "manual" };
+
         if (req.body?.year && req.body?.month) {
-          options.year = parseInt(req.body.year);
-          options.month = parseInt(req.body.month);
+          const requestedYear = parseInt(req.body.year);
+          const requestedMonth = parseInt(req.body.month); // 1-indexed
+
+          // Guard: prevent generating bills for the current or a future month.
+          // Bills can only be generated after the month is fully over.
+          const nowDhaka = new Date(Date.now() + DHAKA_OFFSET_MS);
+          const currentYear = nowDhaka.getUTCFullYear();
+          const currentMonth = nowDhaka.getUTCMonth() + 1; // 1-indexed
+
+          const isCurrentOrFuture =
+            requestedYear > currentYear || (requestedYear === currentYear && requestedMonth >= currentMonth);
+
+          if (isCurrentOrFuture) {
+            return reply.code(400).send({
+              error: `Cannot generate bills for ${requestedYear}-${String(requestedMonth).padStart(2, "0")}. Bills can only be generated after the month has ended.`,
+            });
+          }
+
+          options.year = requestedYear;
+          options.month = requestedMonth;
         }
 
         generateMonthlyBills(fastify.mongo.db, options)
