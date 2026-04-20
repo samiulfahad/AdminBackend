@@ -226,6 +226,67 @@ async function billingRoutes(fastify) {
     },
   );
 
+  // ── PATCH /billing/:billingId/due-date ───────────────────────────────────────
+  fastify.patch(
+    "/billing/:billingId/due-date",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Update the due date of an unpaid bill (max +20 days from current due date)",
+        params: {
+          type: "object",
+          required: ["billingId"],
+          properties: {
+            billingId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["dueDate"],
+          properties: {
+            dueDate: { type: "integer", minimum: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const { dueDate } = req.body;
+
+        const bill = await col().findOne(
+          { _id: toObjectId(req.params.billingId), status: "unpaid" },
+          { projection: { dueDate: 1 } },
+        );
+
+        if (!bill) {
+          return reply.code(404).send({ error: "Bill not found or is not unpaid." });
+        }
+
+        if (dueDate <= Date.now()) {
+          return reply.code(400).send({ error: "Due date must be in the future." });
+        }
+
+        const MAX_MS = 20 * 24 * 60 * 60 * 1000;
+        const maxAllowed = bill.dueDate + MAX_MS;
+
+        if (dueDate > maxAllowed) {
+          return reply.code(400).send({
+            error: `Due date cannot be more than 20 days beyond the current due date (${new Date(maxAllowed).toISOString().slice(0, 10)}).`,
+            maxAllowed,
+          });
+        }
+
+        await col().updateOne({ _id: toObjectId(req.params.billingId) }, { $set: { dueDate } });
+
+        return reply.send({ success: true, dueDate });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to update due date." });
+      }
+    },
+  );
+
   // ── POST /billing/runs/:runId/retry-failed ───────────────────────────────
   fastify.post(
     "/billing/runs/:runId/retry-failed",
