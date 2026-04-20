@@ -14,7 +14,7 @@ export async function generateMonthlyBills(db, options = {}) {
     if (m === 0) {
       m = 12;
       y -= 1;
-    } // January edge case → bill for December
+    }
   }
 
   const periodStart = new Date(Date.UTC(y, m - 1, 1));
@@ -49,7 +49,7 @@ export async function generateMonthlyBills(db, options = {}) {
 
       const invoiceCount = await db.collection("invoices").countDocuments({
         labId: lab._id,
-        "deletion.status": false,
+        "deletion.status": { $ne: true }, // ← fixed: consistent with labs query
         createdAt: {
           $gte: periodStart.getTime(),
           $lt: periodEnd.getTime(),
@@ -160,7 +160,7 @@ export async function retryFailedLabs(db, run) {
 
       const invoiceCount = await db.collection("invoices").countDocuments({
         labId: lab._id,
-        "deletion.status": false,
+        "deletion.status": { $ne: true }, // ← fixed
         createdAt: {
           $gte: periodStart.getTime(),
           $lt: periodEnd.getTime(),
