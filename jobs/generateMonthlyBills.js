@@ -20,10 +20,7 @@ export async function generateMonthlyBills(db, options = {}) {
   const periodStart = new Date(Date.UTC(y, m - 1, 1));
   const periodEnd = new Date(Date.UTC(y, m, 1));
   const periodEndDisplay = new Date(Date.UTC(y, m, 0));
-
-  const naturalDueDate = periodEnd.getTime() + DUE_DAYS * 24 * 60 * 60 * 1000 - DHAKA_OFFSET_MS;
-  const dueDate = Math.max(naturalDueDate, nowUtc + 24 * 60 * 60 * 1000);
-
+  const dueDate = nowUtc + DUE_DAYS * 24 * 60 * 60 * 1000;
   const triggeredBy = options.triggeredBy || "cron";
 
   const labs = await db
@@ -124,16 +121,13 @@ export async function generateMonthlyBills(db, options = {}) {
 }
 
 export async function retryFailedLabs(db, run) {
-  const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
   const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || 7;
   const nowUtc = Date.now();
 
   const periodStart = run.periodStart;
   const periodEnd = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1));
   const periodEndDisplay = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 0));
-
-  const naturalDueDate = periodEnd.getTime() + DUE_DAYS * 24 * 60 * 60 * 1000 - DHAKA_OFFSET_MS;
-  const dueDate = Math.max(naturalDueDate, nowUtc + 24 * 60 * 60 * 1000);
+  const dueDate = nowUtc + DUE_DAYS * 24 * 60 * 60 * 1000;
 
   const retried = [];
   const stillFailing = [];
