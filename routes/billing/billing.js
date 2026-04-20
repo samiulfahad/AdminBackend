@@ -267,12 +267,12 @@ async function billingRoutes(fastify) {
           return reply.code(400).send({ error: "Due date must be in the future." });
         }
 
-        const MAX_MS = 20 * 24 * 60 * 60 * 1000;
+        const MAX_MS = 10 * 24 * 60 * 60 * 1000;
         const maxAllowed = bill.dueDate + MAX_MS;
 
         if (dueDate > maxAllowed) {
           return reply.code(400).send({
-            error: `Due date cannot be more than 20 days beyond the current due date (${new Date(maxAllowed).toISOString().slice(0, 10)}).`,
+            error: `Due date cannot be more than 10 days beyond the current due date (${new Date(maxAllowed).toISOString().slice(0, 10)}).`,
             maxAllowed,
           });
         }
