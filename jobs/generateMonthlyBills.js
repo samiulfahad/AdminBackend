@@ -1,64 +1,66 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// jobs/generateMonthlyBills.js
+// ── jobs/generateMonthlyBills.js ─────────────────────────────────────────────
 //
-// All time rules:
-//  - "Now" is always derived in BST (UTC+6).
-//  - billingPeriodStart / billingPeriodEnd are stored as plain UTC Date objects
-//    whose calendar date matches the BST month boundaries (day=1, midnight UTC).
-//    They are only ever used for range comparisons on createdAt (epoch ms) and
-//    for display, so storing them as UTC midnight of the BST calendar date is fine.
-//  - dueDate is stored as epoch-ms = the last millisecond of the due calendar
-//    day in BST, i.e.  BST 23:59:59.999  →  UTC = that ms − 6 h.
-// ─────────────────────────────────────────────────────────────────────────────
+// All dates stored as UTC milliseconds in MongoDB.
+// "BST" here means Bangladesh Standard Time = UTC+6 (Asia/Dhaka).
+//
+// Key rules:
+//  • periodStart / periodEnd are UTC Date objects representing midnight UTC on
+//    the 1st of the billing month (pure calendar boundaries, no timezone offset
+//    needed because invoice.createdAt is already UTC ms).
+//  • dueDate is stored as UTC ms but always snapped to 23:59:59.999 BST of the
+//    target day  →  17:59:59.999 UTC  (BST = UTC+6, so 23:59 BST = 17:59 UTC).
+//  • The cron fires at 00:05 BST on the 1st of every month.  In UTC that is
+//    18:05 on the last day of the previous month  →  schedule "5 18 * * *" UTC
+//    OR use { timezone: 'Asia/Dhaka' } and schedule "5 0 * * *".
 
-const BST_OFFSET_MS = 6 * 60 * 60 * 1000; // UTC+6
-const DUE_HOUR_BST = { h: 23, m: 59, s: 59, ms: 999 };
-
-/**
- * Given a BST calendar date (year, month 1-indexed, day), return the epoch-ms
- * that corresponds to 23:59:59.999 BST on that day.
- */
-function bstEndOfDay(year, month, day) {
-  // Build UTC midnight of that BST calendar date, then add the time-of-day.
-  const utcMidnight = Date.UTC(year, month - 1, day); // midnight UTC = 06:00 BST
-  // We want 23:59:59.999 BST = 23:59:59.999 - 6h in UTC
-  return (
-    utcMidnight -
-    BST_OFFSET_MS + // shift: UTC midnight → BST midnight
-    DUE_HOUR_BST.h * 3_600_000 +
-    DUE_HOUR_BST.m * 60_000 +
-    DUE_HOUR_BST.s * 1_000 +
-    DUE_HOUR_BST.ms
-  );
-}
+const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000; // UTC+6
 
 /**
- * Return the BST calendar { year, month (1-indexed), day } for a given epoch-ms.
- */
-function toBstDate(epochMs) {
-  const d = new Date(epochMs + BST_OFFSET_MS);
-  return {
-    year: d.getUTCFullYear(),
-    month: d.getUTCMonth() + 1,
-    day: d.getUTCDate(),
-  };
-}
-
-/**
- * Compute the due-date epoch-ms.
+ * Returns the UTC timestamp for 23:59:59.999 BST on the date that is
+ * `daysFromNow` days after the day containing `baseUtcMs` (in BST).
  *
- * Strategy: take "now" in BST, add DUE_DAYS calendar days, then snap to
- * 23:59:59.999 BST of that day.
- * e.g. cron fires 2026-01-01 00:05 BST, DUE_DAYS=7 → due = 2026-01-08 23:59:59.999 BST
+ * Example: baseUtcMs = now, daysFromNow = 7
+ *   → end-of-day BST, 7 days from today BST.
  */
-function computeDueDate(nowUtcMs, dueDays) {
-  const bst = toBstDate(nowUtcMs);
-  // Add dueDays to the BST calendar day.
-  // Use Date arithmetic on a UTC date that represents the BST calendar date.
-  const bstCalendarMs = Date.UTC(bst.year, bst.month - 1, bst.day);
-  const targetMs = bstCalendarMs + dueDays * 24 * 60 * 60 * 1000;
-  const target = new Date(targetMs);
-  return bstEndOfDay(target.getUTCFullYear(), target.getUTCMonth() + 1, target.getUTCDate());
+function endOfDayBST(baseUtcMs, daysFromNow = 0) {
+  // Convert base to BST "calendar day"
+  const bstNow = new Date(baseUtcMs + DHAKA_OFFSET_MS);
+  // Advance by daysFromNow
+  const targetBst = new Date(
+    Date.UTC(
+      bstNow.getUTCFullYear(),
+      bstNow.getUTCMonth(),
+      bstNow.getUTCDate() + daysFromNow,
+      // 23:59:59.999 BST  =  17:59:59.999 UTC  (subtract 6 h)
+      17,
+      59,
+      59,
+      999,
+    ),
+  );
+  return targetBst.getTime();
+}
+
+/**
+ * Given "now" in UTC ms, return { y, m } (1-indexed month) for the billing
+ * period = the previous calendar month in BST.
+ *
+ * The cron fires at 00:05 BST on the 1st, so "current BST month" is the new
+ * month; we want the one before it.
+ */
+function previousBSTMonth(nowUtcMs) {
+  const nowBst = new Date(nowUtcMs + DHAKA_OFFSET_MS);
+  let y = nowBst.getUTCFullYear();
+  let m = nowBst.getUTCMonth() + 1; // 1-indexed current BST month
+
+  // Step back one month
+  if (m === 1) {
+    m = 12;
+    y -= 1;
+  } else {
+    m -= 1;
+  }
+  return { y, m };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,38 +69,27 @@ export async function generateMonthlyBills(db, options = {}) {
   const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || 7;
   const nowUtc = Date.now();
 
-  // ── Determine billing period ────────────────────────────────────────────
-  let y, m; // BST calendar year + month (1-indexed) for the period to bill
-
+  // ── Determine billing period ──────────────────────────────────────────────
+  let y, m; // year and 1-indexed month of the period to bill
   if (options.year && options.month) {
     y = options.year;
     m = options.month; // caller already validated this is a past month
   } else {
-    // Automatic: bill for the month that just ended in BST.
-    // Cron fires at 00:05 BST on the 1st → BST month is the NEW month,
-    // so "previous month" = new month − 1.
-    const bst = toBstDate(nowUtc);
-    y = bst.year;
-    m = bst.month - 1; // previous month
-    if (m === 0) {
-      m = 12;
-      y -= 1;
-    }
+    ({ y, m } = previousBSTMonth(nowUtc));
   }
 
-  // Period boundaries stored as UTC Date objects whose UTC calendar values
-  // match the BST month (adequate for invoice createdAt range queries).
-  const periodStart = new Date(Date.UTC(y, m - 1, 1)); // first ms of the month
-  const periodEnd = new Date(Date.UTC(y, m, 1)); // first ms of next month (exclusive)
-  const periodEndDisplay = new Date(Date.UTC(y, m, 0)); // last day of the month
+  // UTC midnight boundaries for the period (safe for all timezones because
+  // invoice.createdAt is UTC ms, so $gte/$lt on these values is correct).
+  const periodStart = new Date(Date.UTC(y, m - 1, 1)); // 1st 00:00 UTC
+  const periodEnd = new Date(Date.UTC(y, m, 1)); // next month 1st 00:00 UTC (exclusive)
+  const periodEndDisplay = new Date(Date.UTC(y, m, 0)); // last day of billing month
 
-  // Due date: DUE_DAYS calendar days from "now" in BST, snapped to 23:59:59.999 BST.
-  // For manual runs a custom dueDate can be supplied (already a valid epoch-ms).
-  const dueDate = options.dueDate != null ? options.dueDate : computeDueDate(nowUtc, DUE_DAYS);
+  // Due date = 23:59:59.999 BST on the Nth day from now
+  const dueDate = endOfDayBST(nowUtc, DUE_DAYS);
 
   const triggeredBy = options.triggeredBy || "cron";
 
-  // ── Load all active labs ────────────────────────────────────────────────
+  // ── Fetch all active labs ─────────────────────────────────────────────────
   const labs = await db
     .collection("labs")
     .find(
@@ -114,10 +105,11 @@ export async function generateMonthlyBills(db, options = {}) {
 
   for (const lab of labs) {
     try {
-      // Idempotency guard
+      // Idempotency: skip if a bill for this period already exists
       const exists = await db
         .collection("billings")
         .findOne({ labId: lab._id, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
+
       if (exists) {
         skipped++;
         continue;
@@ -146,10 +138,15 @@ export async function generateMonthlyBills(db, options = {}) {
         billingPeriodStart: periodStart,
         billingPeriodEnd: periodEndDisplay,
         invoiceCount,
-        breakdown: { monthlyFee, perInvoiceFee, commission, perInvoiceNet },
+        breakdown: {
+          monthlyFee,
+          perInvoiceFee,
+          commission,
+          perInvoiceNet,
+        },
         totalAmount: isFree ? 0 : totalAmount,
         status: isFree ? "free" : "unpaid",
-        dueDate: isFree ? null : dueDate,
+        dueDate: isFree ? null : dueDate, // UTC ms, snapped to 23:59:59 BST
         createdAt: nowUtc,
         paidAt: null,
         paidBy: null,
@@ -165,8 +162,9 @@ export async function generateMonthlyBills(db, options = {}) {
     }
   }
 
+  // ── Record the run ────────────────────────────────────────────────────────
   const runDoc = {
-    period: `${y}-${String(m).padStart(2, "0")}`,
+    period: periodStart.toISOString().slice(0, 7), // "YYYY-MM"
     periodStart,
     triggeredBy,
     triggeredAt: nowUtc,
@@ -183,13 +181,7 @@ export async function generateMonthlyBills(db, options = {}) {
 
   console.log(
     "[billing]",
-    JSON.stringify({
-      period: runDoc.period,
-      generated,
-      free,
-      skipped,
-      failedCount: failedLabs.length,
-    }),
+    JSON.stringify({ period: runDoc.period, generated, free, skipped, failedCount: failedLabs.length }),
   );
 
   return runDoc;
@@ -205,12 +197,8 @@ export async function retryFailedLabs(db, run) {
   const periodEnd = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1));
   const periodEndDisplay = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 0));
 
-  // Re-use the same due date from the original run if we can find any bill,
-  // otherwise compute a fresh one.
-  const existingBill = await db
-    .collection("billings")
-    .findOne({ billingPeriodStart: periodStart, status: "unpaid" }, { projection: { dueDate: 1 } });
-  const dueDate = existingBill?.dueDate != null ? existingBill.dueDate : computeDueDate(nowUtc, DUE_DAYS);
+  // Re-compute due date from *now* (retry may happen days later)
+  const dueDate = endOfDayBST(nowUtc, DUE_DAYS);
 
   const retried = [];
   const stillFailing = [];
@@ -220,6 +208,7 @@ export async function retryFailedLabs(db, run) {
       const exists = await db
         .collection("billings")
         .findOne({ labId: failed.labId, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
+
       if (exists) {
         retried.push({ labId: failed.labId, result: "already existed" });
         continue;
@@ -271,11 +260,7 @@ export async function retryFailedLabs(db, run) {
 
       retried.push({ labId: failed.labId, labName: lab.name, result: "success" });
     } catch (err) {
-      stillFailing.push({
-        labId: failed.labId,
-        labName: failed.labName,
-        error: err.message,
-      });
+      stillFailing.push({ labId: failed.labId, labName: failed.labName, error: err.message });
     }
   }
 
@@ -294,11 +279,7 @@ export async function retryFailedLabs(db, run) {
 
   console.log(
     "[billing-retry]",
-    JSON.stringify({
-      period: run.period,
-      retried: retried.length,
-      stillFailing: stillFailing.length,
-    }),
+    JSON.stringify({ period: run.period, retried: retried.length, stillFailing: stillFailing.length }),
   );
 
   return { retried, stillFailing };
