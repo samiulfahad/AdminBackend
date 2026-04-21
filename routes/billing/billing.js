@@ -1,15 +1,23 @@
 // ── routes/billing/billing.js  (admin backend) ───────────────────────────────
 
-import toObjectId from "../../utils/db.js";
+import { ObjectId } from "mongodb";
 import { nowBST, endOfDayBST, parseDateStringToBSTEndOfDay } from "../../utils/time.js";
 import { generateMonthlyBills, retryFailedLabs } from "../../jobs/generateMonthlyBills.js";
+
+// Safe ObjectId coercion — returns null if invalid so queries simply find nothing
+const toOid = (v) => {
+  try {
+    return new ObjectId(v);
+  } catch {
+    return null;
+  }
+};
 
 async function billingRoutes(fastify) {
   const col = () => fastify.mongo.db.collection("billings");
   const runsCol = () => fastify.mongo.db.collection("billingRuns");
 
   // ── GET /billing/unpaid-labs ──────────────────────────────────────────────
-  // Labs with unpaid bills — grouped by lab, with per-month tags.
   fastify.get(
     "/billing/unpaid-labs",
     {
@@ -30,8 +38,19 @@ async function billingRoutes(fastify) {
       try {
         const limit = Math.min(req.query.limit ?? 50, 100);
         const skip = req.query.skip ?? 0;
-        const search = req.query.search?.trim();
+        const search = req.query.search?.trim() || null;
 
+        const searchStage = search
+          ? [
+              {
+                $match: {
+                  $or: [{ "labDoc.labKey": search }, { "labDoc.name": { $regex: search, $options: "i" } }],
+                },
+              },
+            ]
+          : [];
+
+        // Single aggregation pass via $facet — avoids running the pipeline twice
         const pipeline = [
           { $match: { status: "unpaid" } },
           { $sort: { billingPeriodStart: -1 } },
@@ -61,33 +80,25 @@ async function billingRoutes(fastify) {
               pipeline: [{ $project: { name: 1, labKey: 1, isActive: 1 } }],
             },
           },
-          { $unwind: { path: "$labDoc", preserveNullAndEmpty: false } },
-          ...(search
-            ? [
-                {
-                  $match: {
-                    $or: [{ "labDoc.labKey": search }, { "labDoc.name": { $regex: search, $options: "i" } }],
-                  },
-                },
-              ]
-            : []),
+          // ✅ FIX: was "preserveNullAndEmpty" (wrong) — correct field is "preserveNullAndEmptyArrays"
+          { $unwind: { path: "$labDoc", preserveNullAndEmptyArrays: false } },
+          ...searchStage,
           { $sort: { unpaidTotal: -1 } },
+          {
+            $facet: {
+              total: [{ $count: "n" }],
+              labs: [{ $skip: skip }, { $limit: limit }],
+            },
+          },
         ];
 
-        const [countResult, labDocs] = await Promise.all([
-          col()
-            .aggregate([...pipeline, { $count: "total" }])
-            .toArray(),
-          col()
-            .aggregate([...pipeline, { $skip: skip }, { $limit: limit }])
-            .toArray(),
-        ]);
+        const [result] = await col().aggregate(pipeline).toArray();
 
-        const total = countResult[0]?.total ?? 0;
+        const total = result?.total?.[0]?.n ?? 0;
         const now = Date.now();
         const MONTH_FMT = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" });
 
-        const labs = labDocs.map((doc) => ({
+        const labs = (result?.labs ?? []).map((doc) => ({
           labId: doc._id,
           labKey: doc.labDoc.labKey,
           labName: doc.labDoc.name,
@@ -115,7 +126,6 @@ async function billingRoutes(fastify) {
   );
 
   // ── GET /billing/lab/:labKey/history ──────────────────────────────────────
-  // Full paginated billing history for a lab, looked up by labKey.
   fastify.get(
     "/billing/lab/:labKey/history",
     {
@@ -175,7 +185,13 @@ async function billingRoutes(fastify) {
           col()
             .aggregate([
               { $match: { labId: lab._id } },
-              { $group: { _id: "$status", count: { $sum: 1 }, total: { $sum: "$totalAmount" } } },
+              {
+                $group: {
+                  _id: "$status",
+                  count: { $sum: 1 },
+                  total: { $sum: "$totalAmount" },
+                },
+              },
             ])
             .toArray(),
         ]);
@@ -198,7 +214,6 @@ async function billingRoutes(fastify) {
   );
 
   // ── GET /billing/lab/:labKey/summary ──────────────────────────────────────
-  // Current unpaid bill + aggregate stats for a lab, looked up by labKey.
   fastify.get(
     "/billing/lab/:labKey/summary",
     {
@@ -227,7 +242,13 @@ async function billingRoutes(fastify) {
           col()
             .aggregate([
               { $match: { labId: lab._id } },
-              { $group: { _id: "$status", count: { $sum: 1 }, total: { $sum: "$totalAmount" } } },
+              {
+                $group: {
+                  _id: "$status",
+                  count: { $sum: 1 },
+                  total: { $sum: "$totalAmount" },
+                },
+              },
             ])
             .toArray(),
         ]);
@@ -342,10 +363,15 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
-        const labId = toObjectId(req.body.labId);
+        const billingOid = toOid(req.params.billingId);
+        const labOid = toOid(req.body.labId);
+
+        if (!billingOid || !labOid) {
+          return reply.code(400).send({ error: "Invalid ID format" });
+        }
 
         const result = await col().updateOne(
-          { _id: toObjectId(req.params.billingId), labId, status: "unpaid" },
+          { _id: billingOid, labId: labOid, status: "unpaid" },
           {
             $set: {
               status: "paid",
@@ -359,12 +385,11 @@ async function billingRoutes(fastify) {
           return reply.code(404).send({ error: "Bill not found or already paid" });
         }
 
-        // Best-effort cache invalidation — failure is non-fatal
         fetch(`${process.env.LAB_API_INTERNAL_URL}/internal/billing/cache-invalidate/${req.body.labId}`, {
           method: "POST",
           headers: { "x-internal-secret": process.env.INTERNAL_SECRET },
         }).catch(() => {
-          req.log.warn("[billing] Could not reach lab-api to invalidate billing cache — expires in ~5 min");
+          req.log.warn("[billing] Could not reach lab-api to invalidate billing cache");
         });
 
         return reply.send({ success: true });
@@ -405,6 +430,9 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
+        const oid = toOid(req.params.billingId);
+        if (!oid) return reply.code(400).send({ error: "Invalid billing ID" });
+
         let newDueDateMs;
         try {
           newDueDateMs = parseDateStringToBSTEndOfDay(req.body.dueDate);
@@ -416,10 +444,7 @@ async function billingRoutes(fastify) {
           return reply.code(400).send({ error: "Due date must be in the future (BST)." });
         }
 
-        const bill = await col().findOne(
-          { _id: toObjectId(req.params.billingId), status: "unpaid" },
-          { projection: { dueDate: 1, labId: 1 } },
-        );
+        const bill = await col().findOne({ _id: oid, status: "unpaid" }, { projection: { dueDate: 1, labId: 1 } });
 
         if (!bill) return reply.code(404).send({ error: "Bill not found or is not unpaid." });
 
@@ -435,7 +460,7 @@ async function billingRoutes(fastify) {
           });
         }
 
-        await col().updateOne({ _id: toObjectId(req.params.billingId) }, { $set: { dueDate: newDueDateMs } });
+        await col().updateOne({ _id: oid }, { $set: { dueDate: newDueDateMs } });
 
         return reply.send({ success: true, dueDate: newDueDateMs, dueDateBST: req.body.dueDate });
       } catch (err) {
@@ -543,8 +568,11 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
+        const oid = toOid(req.params.runId);
+        if (!oid) return reply.code(400).send({ error: "Invalid run ID" });
+
         const run = await runsCol().findOne(
-          { _id: toObjectId(req.params.runId) },
+          { _id: oid },
           { projection: { failedLabs: 1, billingPeriodStart: 1, period: 1 } },
         );
 
