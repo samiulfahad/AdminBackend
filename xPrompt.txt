@@ -1,0 +1,2033 @@
+here is the fn that generates invoice via client backend
+  // ── POST /invoice/add ─────────────────────────────────────────────────────
+  fastify.post("/invoice/add", { ...addInvoiceSchema, ...requireCreate }, async (req, reply) => {
+    try {
+      const { patient, referrer, tests, amount } = req.body;
+
+      if (amount.paid > amount.final) return reply.code(400).send({ error: "Paid amount cannot exceed final amount" });
+
+      let invoiceId;
+      for (let i = 0; i < 5; i++) {
+        const candidate = generateInvoiceId();
+        if (!(await col().findOne({ invoiceId: candidate }, { projection: { _id: 1 } }))) {
+          invoiceId = candidate;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      if (!invoiceId)
+        return reply.code(500).send({ error: "Failed to generate a unique invoice ID, please try again" });
+
+      await col().insertOne({
+        labId: labId(req),
+        labKey: req.user.labKey,
+        invoiceId,
+        createdAt: Date.now(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 24 * 180 * 1000),
+        patient: {
+          name: patient.name,
+          gender: patient.gender,
+          age: patient.age,
+          contactNumber: patient.contactNumber,
+        },
+        referrer: referrer
+          ? {
+              id: referrer.id ? toObjectId(referrer.id) : null,
+              name: referrer.name ?? null,
+              type: referrer.type ?? null,
+            }
+          : { id: null, name: null, type: null },
+        tests: tests.map((t) => ({
+          testId: toObjectId(t.testId),
+          name: t.name,
+          price: t.price,
+          schemaId: t.schemaId ? toObjectId(t.schemaId) : null,
+          ...(t.schemaId && { report: {}, isCompleted: false }),
+        })),
+        amount: {
+          initial: amount.initial,
+          referrerDiscount: amount.referrerDiscount,
+          referrerCommission: amount.referrerCommission,
+          labAdjustment: amount.labAdjustment,
+          final: amount.final,
+          net: amount.net,
+          paid: amount.paid,
+        },
+        createdBy: {
+          id: userId(req),
+          name: req.user.name,
+        },
+        delivery: {
+          status: false,
+          by: { id: userId(req), name: req.user.name },
+        },
+        collections:
+          amount.paid > 0
+            ? [{ by: { id: userId(req), name: req.user.name }, amount: amount.paid, at: Date.now() }]
+            : [],
+        deletion: {
+          status: false,
+          at: null,
+          by: { id: null, name: null },
+        },
+      });
+
+      return reply.code(201).send({
+        invoiceId,
+        link: `https://labpilotpro.com/${invoiceId}`,
+      });
+    } catch (err) {
+      req.log.error(err);
+      return reply.code(500).send({ error: "Failed to create invoice" });
+    }
+  });
+
+  here ia an invoice doc in Mongodb
+{
+  "_id": {
+    "$oid": "69c655f3c10757c2f9708cbe"
+  },
+  "labId": {
+    "$oid": "69c56439abb7753549f107a4"
+  },
+  "labKey": 11111,
+  "invoiceId": "ABT9546",
+  "createdAt": 1774605811117,
+  "patient": {
+    "name": "Mio",
+    "gender": "male",
+    "age": 34,
+    "contactNumber": "01723933738"
+  },
+  "referrer": {
+    "id": {
+      "$oid": "69c6557cc10757c2f9708cbd"
+    },
+    "name": "Dr. Mio ( MBBS, MD, FCPS )",
+    "type": "doctor"
+  },
+  "tests": [
+    {
+      "testId": {
+        "$oid": "69c62935a33fe3ba1675e012"
+      },
+      "name": "Chest X- Ray",
+      "price": 600,
+      "schemaId": {
+        "$oid": "69c56648abb7753549f107b1"
+      },
+      "report": {},
+      "isCompleted": false
+    }
+  ],
+  "amount": {
+    "initial": 600,
+    "referrerDiscount": 0,
+    "referrerCommission": 0,
+    "labAdjustment": 0,
+    "final": 600,
+    "net": 600,
+    "paid": 0
+  },
+  "createdBy": {
+    "id": "69c64b2e07e6540911bb0359",
+    "name": "Samiul"
+  },
+  "delivery": {
+    "status": false,
+    "by": {
+      "id": "69c64b2e07e6540911bb0359",
+      "name": "Samiul"
+    }
+  },
+  "collections": [
+    {
+      "by": {
+        "id": "69c64b2e07e6540911bb0359",
+        "name": "Samiul"
+      },
+      "amount": 0,
+      "at": 1774605811117
+    }
+  ],
+  "deletion": {
+    "status": false,
+    "at": null,
+    "by": {
+      "id": null,
+      "name": null
+    }
+  }
+}
+
+the client backend supports multiple hospitals or labs to create their invoices, upload reports etc.
+here is a lab document in mongodb:
+{
+  "_id": {
+    "$oid": "69c56439abb7753549f107a4"
+  },
+  "name": "Bubu Dudu Hospital",
+  "labKey": "11111",
+  "contact": {
+    "primary": "01723939836",
+    "secondary": "01723939836",
+    "publicEmail": "contact@bubududhospital.com",
+    "privateEmail": "contact2@bubududhospital.com",
+    "address": "Dhanmondi",
+    "district": "Dhaka",
+    "zone": "Bhaluka",
+    "zoneId": {
+      "$oid": "69c5668aabb7753549f107b2"
+    }
+  },
+  "billing": {
+    "perInvoiceFee": 10,
+    "monthlyFee": 2000,
+    "commission": 5
+  },
+  "isActive": true,
+  "createdAt": {
+    "$date": "2026-03-26T16:52:09.789Z"
+  },
+  "registrationNumber": "RGIT5854",
+  "type": "hospital"
+}
+
+here is the billing guard plugin in client server to check if a lab is blocked or not.. if blocked the the invoice generation fails.
+import fp from "fastify-plugin";
+
+async function billingGuardPlugin(fastify) {
+  const cache = new Map();
+  const CACHE_TTL_MS = 5 * 60 * 1000;
+
+  async function fetchBlockedStatus(labId) {
+    const unpaidBill = await fastify.mongo.db
+      .collection("billings")
+      .findOne({ labId, status: "unpaid" }, { projection: { dueDate: 1 }, sort: { billingPeriodStart: -1 } });
+
+    if (!unpaidBill) return false;
+    return Date.now() > unpaidBill.dueDate;
+  }
+
+  fastify.decorate("checkBillingBlocked", async (labIdObj) => {
+    const key = labIdObj.toString();
+    const cached = cache.get(key);
+
+    if (cached && Date.now() < cached.expiresAt) return cached.blocked;
+
+    const blocked = await fetchBlockedStatus(labIdObj);
+    cache.set(key, { blocked, expiresAt: Date.now() + CACHE_TTL_MS });
+    return blocked;
+  });
+
+  fastify.decorate("invalidateBillingCache", (labIdObj) => {
+    cache.delete(labIdObj.toString());
+  });
+}
+
+export default fp(billingGuardPlugin);
+
+
+I want to modify the following code.. Target to achieve:
+1. generate monthly billing for each lab. example:
+ In lab document 
+  "billing": {
+    "perInvoiceFee": 10, // Lab charges from patient
+    "monthlyFee": 2000, // Monthly Fee
+    "commission": 4     // Lab keeps it and pay (10-4) = 6 per invoice to my company
+  },
+
+monthly total fee: monthlyFee + (perInvoiceFee - commission) x No. of invoice of that month.
+
+2. Bill will be generated automatically at 12:05 AM based on Bangladesh standard time. A cron will do it.
+3. If cron fails then retry. 
+4. If all fails then I will do manually. 
+5. A bill will have a last date to pay. suppose within 7th of each month (BST), if generated successfully via cron
+6. If I create a bill manually for a month then I need to provide a date of last date to pay.
+7. suppose this is April running. I must not be able to create the bill of the running month manually. must be after the month ends.
+8. I must be able to see billing of each lab separately.
+9. Option to update the last day of bill payment.
+
+remember one thing, 
+I am using fasti/mongodb which converts the Object Id to string automatically and my clients (labs/hospitals) are from bangladesh only.
+maintain the time issue properly. last day of bill payment should be 11:59:59 PM whenever the bill is created last date must be calculated upto 11:59:59 PM of the day.
+
+I want to force stop creating invoices for the labs that has not paid the bill after the last date... 
+here is the current code which needs to be fixed and time bug. remember the December, 26 bill be generated january, 27.
+
+Admin server code:
+import toObjectId from "../../utils/db.js";
+import { generateMonthlyBills, retryFailedLabs } from "../../jobs/generateMonthlyBills.js";
+
+async function billingRoutes(fastify) {
+  const col = () => fastify.mongo.db.collection("billings");
+  const runsCol = () => fastify.mongo.db.collection("billingRuns");
+
+  // ── GET /billing/all ─────────────────────────────────────────────────────
+  fastify.get(
+    "/billing/all",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Get all bills across all labs",
+        querystring: {
+          type: "object",
+          properties: {
+            status: { type: "string", enum: ["unpaid", "paid", "free"] },
+            limit: { type: "integer", minimum: 1, maximum: 100 },
+            skip: { type: "integer", minimum: 0 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+        const skip = parseInt(req.query.skip) || 0;
+        const filter = req.query.status ? { status: req.query.status } : {};
+
+        const bills = await col()
+          .find(filter, {
+            projection: {
+              labId: 1,
+              status: 1,
+              totalAmount: 1,
+              dueDate: 1,
+              billingPeriodStart: 1,
+              billingPeriodEnd: 1,
+              invoiceCount: 1,
+              breakdown: 1,
+              paidAt: 1,
+              paidBy: 1,
+            },
+          })
+          .sort({ billingPeriodStart: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        return reply.send({ bills });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch bills" });
+      }
+    },
+  );
+
+  // ── GET /billing/runs ────────────────────────────────────────────────────
+  fastify.get(
+    "/billing/runs",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Get billing run history",
+        querystring: {
+          type: "object",
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 50 },
+            skip: { type: "integer", minimum: 0 },
+            hasErrors: { type: "string", enum: ["true", "false"] },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+        const skip = parseInt(req.query.skip) || 0;
+        const filter = req.query.hasErrors === "true" ? { hasErrors: true } : {};
+
+        const runs = await runsCol()
+          .find(filter, {
+            projection: {
+              period: 1,
+              triggeredBy: 1,
+              triggeredAt: 1,
+              totalLabs: 1,
+              generated: 1,
+              free: 1,
+              skipped: 1,
+              failedCount: 1,
+              failedLabs: 1,
+              hasErrors: 1,
+              lastRetryAt: 1,
+              retryResult: 1,
+            },
+          })
+          .sort({ triggeredAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        return reply.send({ runs });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch billing runs" });
+      }
+    },
+  );
+
+  // ── POST /billing/pay/:billingId ─────────────────────────────────────────
+  fastify.post(
+    "/billing/pay/:billingId",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Mark a bill as paid",
+        params: {
+          type: "object",
+          required: ["billingId"],
+          properties: {
+            billingId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["labId"],
+          properties: {
+            labId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const labId = toObjectId(req.body.labId);
+
+        const result = await col().updateOne(
+          {
+            _id: toObjectId(req.params.billingId),
+            labId,
+            status: "unpaid",
+          },
+          {
+            $set: {
+              status: "paid",
+              paidAt: Date.now(),
+              paidBy: { id: "admin", name: "Admin" },
+            },
+          },
+        );
+
+        if (result.matchedCount === 0) {
+          return reply.code(404).send({ error: "Bill not found or already paid" });
+        }
+
+        fetch(`${process.env.LAB_API_INTERNAL_URL}/internal/billing/cache-invalidate/${req.body.labId}`, {
+          method: "POST",
+          headers: { "x-internal-secret": process.env.INTERNAL_SECRET },
+        }).catch(() => {
+          req.log.warn("[billing] Could not reach lab-api to invalidate cache — expires in 5 min");
+        });
+
+        return reply.send({ success: true });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to mark bill as paid" });
+      }
+    },
+  );
+
+  // ── POST /billing/generate ───────────────────────────────────────────────
+  fastify.post(
+    "/billing/generate",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Manually trigger bill generation (idempotent)",
+        body: {
+          type: "object",
+          properties: {
+            year: { type: "integer", minimum: 2024, maximum: 2100 },
+            month: { type: "integer", minimum: 1, maximum: 12 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
+        const options = { triggeredBy: "manual" };
+
+        if (req.body?.year && req.body?.month) {
+          const requestedYear = parseInt(req.body.year);
+          const requestedMonth = parseInt(req.body.month); // 1-indexed
+
+          // Guard: prevent generating bills for the current or a future month.
+          // Bills can only be generated after the month is fully over.
+          const nowDhaka = new Date(Date.now() + DHAKA_OFFSET_MS);
+          const currentYear = nowDhaka.getUTCFullYear();
+          const currentMonth = nowDhaka.getUTCMonth() + 1; // 1-indexed
+
+          const isCurrentOrFuture =
+            requestedYear > currentYear || (requestedYear === currentYear && requestedMonth >= currentMonth);
+
+          if (isCurrentOrFuture) {
+            return reply.code(400).send({
+              error: `Cannot generate bills for ${requestedYear}-${String(requestedMonth).padStart(2, "0")}. Bills can only be generated after the month has ended.`,
+            });
+          }
+
+          options.year = requestedYear;
+          options.month = requestedMonth;
+        }
+
+        generateMonthlyBills(fastify.mongo.db, options)
+          .then((result) => fastify.log.info({ result }, "[billing] Manual generation complete"))
+          .catch((err) => fastify.log.error({ err }, "[billing] Manual generation failed"));
+
+        return reply.send({ message: "Bill generation started", options });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to start bill generation" });
+      }
+    },
+  );
+
+  // ── PATCH /billing/:billingId/due-date ───────────────────────────────────────
+  fastify.patch(
+    "/billing/:billingId/due-date",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Update the due date of an unpaid bill (max +20 days from current due date)",
+        params: {
+          type: "object",
+          required: ["billingId"],
+          properties: {
+            billingId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["dueDate"],
+          properties: {
+            dueDate: { type: "integer", minimum: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const { dueDate } = req.body;
+
+        const bill = await col().findOne(
+          { _id: toObjectId(req.params.billingId), status: "unpaid" },
+          { projection: { dueDate: 1 } },
+        );
+
+        if (!bill) {
+          return reply.code(404).send({ error: "Bill not found or is not unpaid." });
+        }
+
+        if (dueDate <= Date.now()) {
+          return reply.code(400).send({ error: "Due date must be in the future." });
+        }
+
+        const MAX_MS = 10 * 24 * 60 * 60 * 1000;
+        const maxAllowed = bill.dueDate + MAX_MS;
+
+        if (dueDate > maxAllowed) {
+          return reply.code(400).send({
+            error: `Due date cannot be more than 10 days beyond the current due date (${new Date(maxAllowed).toISOString().slice(0, 10)}).`,
+            maxAllowed,
+          });
+        }
+
+        await col().updateOne({ _id: toObjectId(req.params.billingId) }, { $set: { dueDate } });
+
+        return reply.send({ success: true, dueDate });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to update due date." });
+      }
+    },
+  );
+
+  // ── POST /billing/runs/:runId/retry-failed ───────────────────────────────
+  fastify.post(
+    "/billing/runs/:runId/retry-failed",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Retry failed labs from a specific billing run",
+        params: {
+          type: "object",
+          required: ["runId"],
+          properties: {
+            runId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const run = await runsCol().findOne(
+          { _id: toObjectId(req.params.runId) },
+          { projection: { failedLabs: 1, periodStart: 1, period: 1 } },
+        );
+
+        if (!run) {
+          return reply.code(404).send({ error: "Run not found" });
+        }
+
+        if (!run.failedLabs?.length) {
+          return reply.send({ message: "No failed labs in this run" });
+        }
+
+        retryFailedLabs(fastify.mongo.db, run)
+          .then((result) => fastify.log.info({ result }, "[billing] Retry complete"))
+          .catch((err) => fastify.log.error({ err }, "[billing] Retry failed"));
+
+        return reply.send({
+          message: `Retrying ${run.failedLabs.length} failed lab(s) from ${run.period}`,
+        });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to start retry" });
+      }
+    },
+  );
+}
+
+export default billingRoutes;
+
+export async function generateMonthlyBills(db, options = {}) {
+  const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
+  const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || 7;
+  const nowUtc = Date.now();
+
+  let y, m;
+  if (options.year && options.month) {
+    y = options.year;
+    m = options.month; // 1-indexed
+  } else {
+    const nowDhaka = new Date(nowUtc + DHAKA_OFFSET_MS);
+    y = nowDhaka.getUTCFullYear();
+    m = nowDhaka.getUTCMonth(); // 0-indexed → gives previous month (postpaid)
+    if (m === 0) {
+      m = 12;
+      y -= 1;
+    }
+  }
+
+  const periodStart = new Date(Date.UTC(y, m - 1, 1));
+  const periodEnd = new Date(Date.UTC(y, m, 1));
+  const periodEndDisplay = new Date(Date.UTC(y, m, 0));
+  const dueDate = nowUtc + DUE_DAYS * 24 * 60 * 60 * 1000;
+  const triggeredBy = options.triggeredBy || "cron";
+
+  const labs = await db
+    .collection("labs")
+    .find({ "deletion.status": { $ne: true } }, { projection: { _id: 1, name: 1, labKey: 1, billing: 1 } })
+    .toArray();
+
+  let generated = 0;
+  let free = 0;
+  let skipped = 0;
+  const failedLabs = [];
+
+  for (const lab of labs) {
+    try {
+      const exists = await db
+        .collection("billings")
+        .findOne({ labId: lab._id, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
+      if (exists) {
+        skipped++;
+        continue;
+      }
+
+      const monthlyFee = lab.billing?.monthlyFee ?? 0;
+      const perInvoiceFee = lab.billing?.perInvoiceFee ?? 0;
+      const commission = lab.billing?.commission ?? 0;
+
+      const invoiceCount = await db.collection("invoices").countDocuments({
+        labId: lab._id,
+        "deletion.status": { $ne: true }, // ← fixed: consistent with labs query
+        createdAt: {
+          $gte: periodStart.getTime(),
+          $lt: periodEnd.getTime(),
+        },
+      });
+
+      const perInvoiceNet = perInvoiceFee - commission;
+      const totalAmount = monthlyFee + perInvoiceNet * invoiceCount;
+      const isFree = totalAmount <= 0;
+
+      await db.collection("billings").insertOne({
+        labId: lab._id,
+        labKey: lab.labKey,
+        billingPeriodStart: periodStart,
+        billingPeriodEnd: periodEndDisplay,
+        invoiceCount,
+        breakdown: {
+          monthlyFee,
+          perInvoiceFee,
+          commission,
+          perInvoiceNet,
+        },
+        totalAmount: isFree ? 0 : totalAmount,
+        status: isFree ? "free" : "unpaid",
+        dueDate: isFree ? null : dueDate,
+        createdAt: nowUtc,
+        paidAt: null,
+        paidBy: null,
+      });
+
+      isFree ? free++ : generated++;
+    } catch (err) {
+      failedLabs.push({
+        labId: lab._id,
+        labName: lab.name ?? "Unknown",
+        error: err.message,
+      });
+    }
+  }
+
+  const runDoc = {
+    period: periodStart.toISOString().slice(0, 7),
+    periodStart,
+    triggeredBy,
+    triggeredAt: nowUtc,
+    totalLabs: labs.length,
+    generated,
+    free,
+    skipped,
+    failedCount: failedLabs.length,
+    failedLabs,
+    hasErrors: failedLabs.length > 0,
+  };
+
+  await db.collection("billingRuns").insertOne(runDoc);
+
+  console.log(
+    "[billing]",
+    JSON.stringify({
+      period: runDoc.period,
+      generated,
+      free,
+      skipped,
+      failedCount: failedLabs.length,
+    }),
+  );
+
+  return runDoc;
+}
+
+export async function retryFailedLabs(db, run) {
+  const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || 7;
+  const nowUtc = Date.now();
+
+  const periodStart = run.periodStart;
+  const periodEnd = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1));
+  const periodEndDisplay = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 0));
+  const dueDate = nowUtc + DUE_DAYS * 24 * 60 * 60 * 1000;
+
+  const retried = [];
+  const stillFailing = [];
+
+  for (const failed of run.failedLabs) {
+    try {
+      const exists = await db
+        .collection("billings")
+        .findOne({ labId: failed.labId, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
+      if (exists) {
+        retried.push({ labId: failed.labId, result: "already existed" });
+        continue;
+      }
+
+      const lab = await db
+        .collection("labs")
+        .findOne(
+          { _id: failed.labId, "deletion.status": { $ne: true } },
+          { projection: { _id: 1, name: 1, labKey: 1, billing: 1 } },
+        );
+
+      if (!lab) {
+        stillFailing.push({ labId: failed.labId, error: "Lab not found" });
+        continue;
+      }
+
+      const monthlyFee = lab.billing?.monthlyFee ?? 0;
+      const perInvoiceFee = lab.billing?.perInvoiceFee ?? 0;
+      const commission = lab.billing?.commission ?? 0;
+
+      const invoiceCount = await db.collection("invoices").countDocuments({
+        labId: lab._id,
+        "deletion.status": { $ne: true }, // ← fixed
+        createdAt: {
+          $gte: periodStart.getTime(),
+          $lt: periodEnd.getTime(),
+        },
+      });
+
+      const perInvoiceNet = perInvoiceFee - commission;
+      const totalAmount = monthlyFee + perInvoiceNet * invoiceCount;
+      const isFree = totalAmount <= 0;
+
+      await db.collection("billings").insertOne({
+        labId: lab._id,
+        labKey: lab.labKey,
+        billingPeriodStart: periodStart,
+        billingPeriodEnd: periodEndDisplay,
+        invoiceCount,
+        breakdown: { monthlyFee, perInvoiceFee, commission, perInvoiceNet },
+        totalAmount: isFree ? 0 : totalAmount,
+        status: isFree ? "free" : "unpaid",
+        dueDate: isFree ? null : dueDate,
+        createdAt: nowUtc,
+        paidAt: null,
+        paidBy: null,
+      });
+
+      retried.push({ labId: failed.labId, labName: lab.name, result: "success" });
+    } catch (err) {
+      stillFailing.push({
+        labId: failed.labId,
+        labName: failed.labName,
+        error: err.message,
+      });
+    }
+  }
+
+  await db.collection("billingRuns").updateOne(
+    { _id: run._id },
+    {
+      $set: {
+        failedLabs: stillFailing,
+        failedCount: stillFailing.length,
+        hasErrors: stillFailing.length > 0,
+        lastRetryAt: nowUtc,
+        retryResult: { retried, stillFailing },
+      },
+    },
+  );
+
+  console.log(
+    "[billing-retry]",
+    JSON.stringify({
+      period: run.period,
+      retried: retried.length,
+      stillFailing: stillFailing.length,
+    }),
+  );
+
+  return { retried, stillFailing };
+}
+
+and for client backend or server where labs create invoices:
+import toObjectId from "../../utils/db.js";
+
+async function billingRoutes(fastify) {
+  const col = () => fastify.mongo.db.collection("billings");
+
+  fastify.addHook("onRequest", fastify.authenticate);
+
+  // ── GET /billing/status ──────────────────────────────────────────────────
+  fastify.get(
+    "/billing/status",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Get current unpaid bill status for the lab",
+      },
+    },
+    async (req, reply) => {
+      try {
+        const unpaidBill = await col().findOne(
+          { labId: toObjectId(req.user.labId), status: "unpaid" },
+          { sort: { billingPeriodStart: -1 } },
+        );
+
+        if (!unpaidBill) return reply.send({ hasUnpaidBill: false });
+
+        const isOverdue = Date.now() > unpaidBill.dueDate;
+
+        return reply.send({
+          hasUnpaidBill: true,
+          isOverdue,
+          bill: {
+            id: unpaidBill._id,
+            amount: unpaidBill.totalAmount,
+            dueDate: unpaidBill.dueDate,
+            billingPeriod: unpaidBill.billingPeriodStart,
+            invoiceCount: unpaidBill.invoiceCount,
+            breakdown: unpaidBill.breakdown,
+          },
+        });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch billing status" });
+      }
+    },
+  );
+
+  // ── GET /billing/history ─────────────────────────────────────────────────
+  fastify.get(
+    "/billing/history",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Get billing history for the lab (last 24 months)",
+      },
+    },
+    async (req, reply) => {
+      try {
+        const bills = await col()
+          .find(
+            { labId: toObjectId(req.user.labId) },
+            {
+              projection: {
+                status: 1,
+                totalAmount: 1,
+                dueDate: 1,
+                billingPeriodStart: 1,
+                billingPeriodEnd: 1,
+                invoiceCount: 1,
+                breakdown: 1,
+                paidAt: 1,
+                paidBy: 1,
+              },
+            },
+          )
+          .sort({ billingPeriodStart: -1 })
+          .limit(24)
+          .toArray();
+
+        return reply.send({ bills });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch billing history" });
+      }
+    },
+  );
+
+  // ── POST /billing/pay/:billingId ─────────────────────────────────────────
+  // Simple pay button for now — replace with payment gateway webhook later
+  fastify.post(
+    "/billing/pay/:billingId",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Mark a bill as paid (payment gateway later)",
+        params: {
+          type: "object",
+          required: ["billingId"],
+          properties: {
+            billingId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const labId = toObjectId(req.user.labId);
+
+        const result = await col().updateOne(
+          {
+            _id: toObjectId(req.params.billingId),
+            labId,
+            status: "unpaid",
+          },
+          {
+            $set: {
+              status: "paid",
+              paidAt: Date.now(),
+              paidBy: { id: toObjectId(req.user.id), name: req.user.name },
+            },
+          },
+        );
+
+        if (result.matchedCount === 0) {
+          return reply.code(404).send({ error: "Bill not found or already paid" });
+        }
+
+        fastify.invalidateBillingCache(labId);
+
+        return reply.send({ success: true });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to mark bill as paid" });
+      }
+    },
+  );
+}
+
+export default billingRoutes;
+
+import toObjectId from "../../utils/db.js";
+
+async function internalRoutes(fastify) {
+  // Not behind fastify.authenticate — protected by INTERNAL_SECRET header only
+  // Called by admin-api after marking a bill paid to instantly unblock the lab
+  fastify.post("/internal/billing/cache-invalidate/:labId", async (req, reply) => {
+    try {
+      const secret = req.headers["x-internal-secret"];
+      if (!secret || secret !== process.env.INTERNAL_SECRET) {
+        return reply.code(403).send({ error: "Forbidden" });
+      }
+
+      fastify.invalidateBillingCache(toObjectId(req.params.labId));
+      return reply.send({ success: true });
+    } catch (err) {
+      req.log.error(err);
+      return reply.code(500).send({ error: "Cache invalidation failed" });
+    }
+  });
+}
+
+export default internalRoutes;
+
+Create the whole billing system and fix time related issues carefully.
+
+and also react frontend for admin.
+here is the existing frontend which needs to be modified also. the current frontend is having issue with changing the due date. if I change a due date or last date of payment then the time becomes 1day ahead. like i edited 5th May... on frontend et shows 6th may.
+
+import { useState, useEffect, useCallback } from "react";
+import {
+  CreditCard,
+  Clock,
+  AlertTriangle,
+  CheckCircle2,
+  RefreshCw,
+  FileText,
+  TrendingUp,
+  Calendar,
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  Play,
+  RotateCcw,
+  Building2,
+  Zap,
+  Filter,
+  Gift,
+  XCircle,
+  Activity,
+} from "lucide-react";
+import adminBillingService from "../../api/adminBilling";
+import Popup from "../../components/popup";
+
+const MAX_DUE_EXTENSION_MS = 10 * 24 * 60 * 60 * 1000;
+
+const fmt = {
+  currency: (amount) =>
+    new Intl.NumberFormat("en-BD", {
+      style: "currency",
+      currency: "BDT",
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(amount ?? 0),
+
+  date: (ts) =>
+    ts
+      ? new Date(ts).toLocaleDateString("en-BD", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        })
+      : "—",
+
+  period: (ts) =>
+    ts
+      ? new Date(ts).toLocaleDateString("en-BD", {
+          year: "numeric",
+          month: "long",
+        })
+      : "—",
+
+  datetime: (ts) =>
+    ts
+      ? new Date(ts).toLocaleString("en-BD", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "—",
+
+  isoDate: (ts) => (ts ? new Date(ts).toISOString().slice(0, 10) : ""),
+};
+
+// ─── Skeleton primitives ──────────────────────────────────────────────────────
+
+const Sk = ({ className = "" }) => <div className={`animate-pulse rounded-lg bg-gray-200/80 ${className}`} />;
+
+const StatsSkeleton = () => (
+  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+    {[...Array(4)].map((_, i) => (
+      <div key={i} className="bg-white border border-gray-200/80 rounded-xl px-4 py-3 shadow-sm space-y-2">
+        <Sk className="h-2.5 w-16" />
+        <Sk className="h-6 w-20" />
+        <Sk className="h-2.5 w-24" />
+      </div>
+    ))}
+  </div>
+);
+
+const TableSkeleton = ({ rows = 6 }) => (
+  <div className="border border-gray-200/80 rounded-2xl overflow-hidden shadow-sm">
+    <div className="w-full overflow-x-auto">
+      <table className="w-full text-left border-collapse" style={{ minWidth: "500px" }}>
+        <tbody className="divide-y divide-gray-100">
+          {[...Array(rows)].map((_, i) => (
+            <tr key={i} className="animate-pulse">
+              {[...Array(5)].map((__, j) => (
+                <td key={j} className="px-4 py-3.5">
+                  <Sk className={`h-3.5 ${j === 0 ? "w-20" : j === 4 ? "w-8" : "w-16"}`} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+);
+
+// ─── Status Badge ─────────────────────────────────────────────────────────────
+
+const StatusBadge = ({ status, isOverdue }) => {
+  if (status === "paid")
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-green-50 text-green-700 border border-green-200">
+        <CheckCircle2 className="w-3 h-3" /> Paid
+      </span>
+    );
+  if (status === "free")
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+        <Gift className="w-3 h-3" /> Free
+      </span>
+    );
+  if (isOverdue)
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-700 border border-red-200">
+        <AlertTriangle className="w-3 h-3" /> Overdue
+      </span>
+    );
+  return (
+    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+      <Clock className="w-3 h-3" /> Unpaid
+    </span>
+  );
+};
+
+// ─── Breakdown Panel ──────────────────────────────────────────────────────────
+
+const BreakdownPanel = ({ breakdown }) => {
+  if (!breakdown) return null;
+  const rows = [
+    { label: "Monthly fee", value: breakdown.monthlyFee },
+    { label: "Per-invoice fee", value: breakdown.perInvoiceFee },
+    { label: "Commission", value: breakdown.commission },
+    { label: "Net per invoice", value: breakdown.perInvoiceNet },
+  ].filter((r) => r.value != null);
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200/80 overflow-hidden">
+      <p className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100 flex items-center gap-2">
+        <TrendingUp className="w-3.5 h-3.5 text-blue-500" />
+        Charge breakdown
+      </p>
+      {rows.map((r) => (
+        <div key={r.label} className="flex justify-between px-4 py-2 border-b border-gray-50 last:border-b-0 text-sm">
+          <span className="text-gray-500">{r.label}</span>
+          <span className="font-medium text-gray-800">{fmt.currency(r.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// ─── Bill Row ─────────────────────────────────────────────────────────────────
+
+const BillRow = ({ bill, onPaySuccess }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [paying, setPaying] = useState(false);
+  const [popup, setPopup] = useState(null);
+
+  const [editingDue, setEditingDue] = useState(false);
+  const [newDueDate, setNewDueDate] = useState("");
+  const [savingDue, setSavingDue] = useState(false);
+
+  const isOverdue = bill.status === "unpaid" && Date.now() > bill.dueDate;
+
+  // The max selectable date = current dueDate + 20 days
+  const maxDueDateStr = bill.dueDate ? fmt.isoDate(bill.dueDate + MAX_DUE_EXTENSION_MS) : "";
+
+  // min = tomorrow (can't pick today or past)
+  const minDueDateStr = fmt.isoDate(Date.now() + 86_400_000);
+
+  const handlePay = async (e) => {
+    e.stopPropagation();
+    setPaying(true);
+    try {
+      await adminBillingService.pay(bill._id, bill.labId);
+      setPopup({ type: "success", message: "Bill has been marked as paid successfully." });
+      onPaySuccess();
+    } catch (err) {
+      setPopup({
+        type: "error",
+        message: err?.response?.data?.error || "Payment failed. Please try again.",
+      });
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const openDueEditor = (e) => {
+    e.stopPropagation();
+    // Seed with current due date, clamped to max
+    const seed = bill.dueDate ? fmt.isoDate(bill.dueDate) : minDueDateStr;
+    setNewDueDate(seed);
+    setEditingDue(true);
+  };
+
+  const cancelDueEdit = (e) => {
+    e?.stopPropagation();
+    setEditingDue(false);
+  };
+
+  const saveDueDate = async (e) => {
+    e.stopPropagation();
+    if (!newDueDate) return;
+
+    // End-of-day UTC so picking "Jan 30" → Jan 30 23:59:59.999Z
+    const chosenMs = new Date(newDueDate + "T23:59:59.999Z").getTime();
+
+    if (chosenMs <= Date.now()) {
+      setPopup({ type: "error", message: "Due date must be in the future." });
+      return;
+    }
+
+    if (bill.dueDate && chosenMs > bill.dueDate + MAX_DUE_EXTENSION_MS) {
+      setPopup({
+        type: "error",
+        message: `Cannot extend beyond ${fmt.date(bill.dueDate + MAX_DUE_EXTENSION_MS)} (20-day limit).`,
+      });
+      return;
+    }
+
+    setSavingDue(true);
+    try {
+      await adminBillingService.updateDueDate(bill._id, chosenMs);
+      setPopup({ type: "success", message: "Due date updated successfully." });
+      setEditingDue(false);
+      onPaySuccess();
+    } catch (err) {
+      setPopup({
+        type: "error",
+        message: err?.response?.data?.error || "Failed to update due date.",
+      });
+    } finally {
+      setSavingDue(false);
+    }
+  };
+
+  return (
+    <>
+      {popup && <Popup type={popup.type} message={popup.message} onClose={() => setPopup(null)} />}
+
+      <tr className="hover:bg-gray-50/80 transition-colors cursor-pointer" onClick={() => setExpanded((v) => !v)}>
+        <td className="px-3 py-3 text-sm whitespace-nowrap">
+          <div className="flex items-center gap-1.5">
+            <div className="w-6 h-6 bg-blue-50 border border-blue-100 rounded-md flex items-center justify-center flex-shrink-0">
+              <Building2 className="w-3 h-3 text-blue-500" />
+            </div>
+            <span className="font-mono text-xs text-gray-500">…{String(bill.labId).slice(-6)}</span>
+          </div>
+        </td>
+
+        <td className="px-3 py-3 text-sm font-semibold text-gray-900 whitespace-nowrap">
+          {fmt.currency(bill.totalAmount)}
+        </td>
+
+        <td className="px-3 py-3 whitespace-nowrap">
+          <StatusBadge status={bill.status} isOverdue={isOverdue} />
+        </td>
+
+        <td className="px-3 py-3 text-sm text-gray-500 whitespace-nowrap hidden sm:table-cell">
+          <div className="flex items-center gap-1">
+            <Calendar className="w-3 h-3 text-gray-400 flex-shrink-0" />
+            {fmt.period(bill.billingPeriodStart)}
+          </div>
+        </td>
+
+        <td className="px-3 py-3 whitespace-nowrap">
+          {bill.status === "unpaid" && (
+            <button
+              onClick={handlePay}
+              disabled={paying}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95"
+            >
+              {paying ? <Loader2 className="w-3 h-3 animate-spin" /> : <CreditCard className="w-3 h-3" />}
+              Pay
+            </button>
+          )}
+        </td>
+
+        <td className="px-3 py-3 text-center w-8">
+          {expanded ? (
+            <ChevronUp className="w-4 h-4 text-gray-400 mx-auto" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-gray-400 mx-auto" />
+          )}
+        </td>
+      </tr>
+
+      {expanded && (
+        <tr className="bg-gray-50/60">
+          <td colSpan={6} className="px-3 pb-4 pt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <BreakdownPanel breakdown={bill.breakdown} />
+
+              <div className="bg-white rounded-xl border border-gray-200/80 overflow-hidden">
+                <p className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100">
+                  Details
+                </p>
+                <div className="divide-y divide-gray-50">
+                  <div className="flex justify-between gap-4 px-4 py-2">
+                    <span className="text-gray-500 shrink-0">Lab ID</span>
+                    <span className="font-mono text-xs text-gray-700 break-all text-right">{String(bill.labId)}</span>
+                  </div>
+
+                  <div className="flex justify-between gap-4 px-4 py-2">
+                    <span className="text-gray-500 shrink-0">Period</span>
+                    <span className="font-medium text-gray-800 text-right">
+                      {fmt.date(bill.billingPeriodStart)} – {fmt.date(bill.billingPeriodEnd)}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between gap-4 px-4 py-2">
+                    <span className="text-gray-500 shrink-0">Invoices</span>
+                    <span className="font-medium text-gray-800">{bill.invoiceCount ?? 0}</span>
+                  </div>
+
+                  {/* ── Due date — editable only for unpaid ── */}
+                  <div className="flex justify-between items-center gap-4 px-4 py-2 min-h-[40px]">
+                    <span className="text-gray-500 shrink-0">Due</span>
+
+                    {bill.status === "unpaid" ? (
+                      editingDue ? (
+                        <div
+                          className="flex items-center gap-2 flex-wrap justify-end"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="flex flex-col items-end gap-0.5">
+                            <input
+                              type="date"
+                              value={newDueDate}
+                              min={minDueDateStr}
+                              max={maxDueDateStr}
+                              onChange={(e) => setNewDueDate(e.target.value)}
+                              className="px-2 py-1 text-xs rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+                            />
+                            <span className="text-[10px] text-gray-400">
+                              Max: {fmt.date(bill.dueDate + MAX_DUE_EXTENSION_MS)}
+                            </span>
+                          </div>
+                          <button
+                            onClick={saveDueDate}
+                            disabled={savingDue}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 transition-all"
+                          >
+                            {savingDue ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-3 h-3" />
+                            )}
+                            Save
+                          </button>
+                          <button
+                            onClick={cancelDueEdit}
+                            className="inline-flex items-center px-2 py-1.5 rounded-lg text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-all"
+                          >
+                            <XCircle className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className={`font-medium ${isOverdue ? "text-red-600" : "text-gray-800"}`}>
+                            {fmt.date(bill.dueDate)}
+                          </span>
+                          <button
+                            onClick={openDueEditor}
+                            title="Extend due date (max +10 days)"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium text-blue-600 bg-blue-50 border border-blue-100 hover:bg-blue-100 transition-all"
+                          >
+                            <Calendar className="w-3 h-3" />
+                            Edit
+                          </button>
+                        </div>
+                      )
+                    ) : (
+                      <span className="font-medium text-gray-800">{fmt.date(bill.dueDate)}</span>
+                    )}
+                  </div>
+
+                  {bill.status === "paid" && (
+                    <>
+                      <div className="flex justify-between gap-4 px-4 py-2">
+                        <span className="text-gray-500 shrink-0">Paid at</span>
+                        <span className="font-medium text-gray-800 text-right">{fmt.datetime(bill.paidAt)}</span>
+                      </div>
+                      {bill.paidBy?.name && (
+                        <div className="flex justify-between gap-4 px-4 py-2">
+                          <span className="text-gray-500 shrink-0">Paid by</span>
+                          <span className="font-medium text-gray-800">{bill.paidBy.name}</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+};
+
+// ─── Run Row ──────────────────────────────────────────────────────────────────
+
+const RunRow = ({ run, onRetry }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [popup, setPopup] = useState(null);
+
+  const handleRetry = async (e) => {
+    e.stopPropagation();
+    setRetrying(true);
+    try {
+      const res = await adminBillingService.retryRun(run._id);
+      setPopup({
+        type: "success",
+        message: res.data?.message || "Retry started successfully.",
+      });
+      onRetry();
+    } catch (err) {
+      setPopup({
+        type: "error",
+        message: err?.response?.data?.error || "Retry failed. Please try again.",
+      });
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  return (
+    <>
+      {popup && <Popup type={popup.type} message={popup.message} onClose={() => setPopup(null)} />}
+
+      <tr className="hover:bg-gray-50/80 transition-colors cursor-pointer" onClick={() => setExpanded((v) => !v)}>
+        <td className="px-3 py-3 text-sm font-semibold text-gray-800 whitespace-nowrap">{run.period}</td>
+
+        <td className="px-3 py-3 text-sm whitespace-nowrap">
+          <div className="flex items-center gap-1.5">
+            <span className="text-green-600 font-semibold">{run.generated}</span>
+            <span className="text-gray-300">/</span>
+            <span className="text-gray-500 text-xs">{run.totalLabs} labs</span>
+          </div>
+        </td>
+
+        <td className="px-3 py-3 whitespace-nowrap">
+          {run.hasErrors ? (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-700 border border-red-200">
+              <XCircle className="w-3 h-3" />
+              {run.failedCount}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-green-50 text-green-700 border border-green-200">
+              <CheckCircle2 className="w-3 h-3" /> OK
+            </span>
+          )}
+        </td>
+
+        <td className="px-3 py-3 whitespace-nowrap hidden sm:table-cell">
+          <span
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium border ${
+              run.triggeredBy === "cron"
+                ? "bg-blue-50 text-blue-700 border-blue-200"
+                : "bg-violet-50 text-violet-700 border-violet-200"
+            }`}
+          >
+            {run.triggeredBy === "cron" ? <Activity className="w-3 h-3" /> : <Zap className="w-3 h-3" />}
+            {run.triggeredBy}
+          </span>
+        </td>
+
+        <td className="px-3 py-3 whitespace-nowrap">
+          {run.hasErrors && (
+            <button
+              onClick={handleRetry}
+              disabled={retrying}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-amber-500 hover:bg-amber-600 disabled:opacity-60 transition-all shadow-sm active:scale-95"
+            >
+              {retrying ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+              Retry
+            </button>
+          )}
+        </td>
+
+        <td className="px-3 py-3 text-center w-8">
+          {expanded ? (
+            <ChevronUp className="w-4 h-4 text-gray-400 mx-auto" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-gray-400 mx-auto" />
+          )}
+        </td>
+      </tr>
+
+      {expanded && (
+        <tr className="bg-gray-50/60">
+          <td colSpan={6} className="px-3 pb-4 pt-2">
+            <p className="text-xs text-gray-400 mb-3">
+              Triggered: {fmt.datetime(run.triggeredAt)}
+              {run.lastRetryAt && <> · Last retry: {fmt.datetime(run.lastRetryAt)}</>}
+            </p>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm mb-3">
+              {[
+                { label: "Generated", value: run.generated, color: "text-green-700" },
+                { label: "Free", value: run.free, color: "text-purple-700" },
+                { label: "Skipped", value: run.skipped, color: "text-gray-600" },
+                { label: "Failed", value: run.failedCount, color: "text-red-600" },
+              ].map((s) => (
+                <div key={s.label} className="bg-white rounded-xl border border-gray-200/80 px-3 py-2.5">
+                  <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">{s.label}</p>
+                  <p className={`text-lg font-bold ${s.color}`}>{s.value}</p>
+                </div>
+              ))}
+            </div>
+
+            {run.failedLabs?.length > 0 && (
+              <div className="bg-white rounded-xl border border-red-200 overflow-hidden">
+                <p className="px-4 py-2.5 text-xs font-semibold text-red-600 uppercase tracking-wide border-b border-red-100 flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  Failed labs
+                </p>
+                {run.failedLabs.map((f, i) => (
+                  <div key={i} className="flex flex-col gap-0.5 px-4 py-2.5 border-b border-gray-50 last:border-b-0">
+                    <p className="text-sm font-medium text-gray-800">{f.labName || "Unknown"}</p>
+                    <p className="font-mono text-xs text-gray-400 break-all">{String(f.labId)}</p>
+                    <p className="text-xs text-red-500 mt-0.5">{f.error}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+};
+
+// ─── Generate Modal ───────────────────────────────────────────────────────────
+
+const GenerateModal = ({ onClose, onSuccess }) => {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth());
+  const [loading, setLoading] = useState(false);
+  const [popup, setPopup] = useState(null);
+
+  const handleGenerate = async () => {
+    setLoading(true);
+    try {
+      const res = await adminBillingService.generate({ year, month });
+      setPopup({
+        type: "success",
+        message: res.data?.message || "Bill generation started successfully.",
+      });
+    } catch (err) {
+      setPopup({
+        type: "error",
+        message: err?.response?.data?.error || "Failed to start bill generation.",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePopupClose = () => {
+    const type = popup?.type;
+    setPopup(null);
+    if (type === "success") onSuccess();
+  };
+
+  const monthNames = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ];
+
+  return (
+    <>
+      {popup && <Popup type={popup.type} message={popup.message} onClose={handlePopupClose} />}
+
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+        <div className="bg-white rounded-2xl shadow-2xl border border-gray-200/80 w-full max-w-sm p-6">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-10 h-10 bg-blue-50 border border-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
+              <Play className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-gray-900">Generate Bills</h3>
+              <p className="text-xs text-gray-500">Select billing period</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1.5 block">Year</label>
+              <input
+                type="number"
+                value={year}
+                onChange={(e) => setYear(parseInt(e.target.value))}
+                min={2024}
+                max={2100}
+                className="w-full px-3 py-2 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1.5 block">Month</label>
+              <select
+                value={month}
+                onChange={(e) => setMonth(parseInt(e.target.value))}
+                className="w-full px-3 py-2 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 bg-white"
+              >
+                {monthNames.map((name, i) => (
+                  <option key={i} value={i + 1}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={loading}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 transition-all shadow-md shadow-blue-200"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+              Generate
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+// ─── Tab Button ───────────────────────────────────────────────────────────────
+
+const Tab = ({ active, onClick, icon: Icon, label, count }) => (
+  <button
+    onClick={onClick}
+    className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all ${
+      active
+        ? "bg-white text-blue-700 border border-blue-200/80 shadow-sm"
+        : "text-gray-500 hover:text-gray-800 hover:bg-white/60"
+    }`}
+  >
+    <Icon className="w-4 h-4" />
+    <span className="hidden xs:inline">{label}</span>
+    {count != null && (
+      <span
+        className={`text-xs px-1.5 py-0.5 rounded-md font-semibold ${
+          active ? "bg-blue-50 text-blue-600" : "bg-gray-100 text-gray-500"
+        }`}
+      >
+        {count}
+      </span>
+    )}
+  </button>
+);
+
+// ─── Main Admin Billing Page ──────────────────────────────────────────────────
+
+const AdminBilling = () => {
+  const [tab, setTab] = useState("bills");
+
+  const [bills, setBills] = useState([]);
+  const [loadingBills, setLoadingBills] = useState(true);
+  const [billsError, setBillsError] = useState(null);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [billsSkip, setBillsSkip] = useState(0);
+  const BILLS_LIMIT = 20;
+
+  const [runs, setRuns] = useState([]);
+  const [loadingRuns, setLoadingRuns] = useState(true);
+  const [runsError, setRunsError] = useState(null);
+  const [errorsOnly, setErrorsOnly] = useState(false);
+
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [loadingSummary, setLoadingSummary] = useState(true);
+
+  const fetchBills = useCallback(async (skip = 0, filter = "") => {
+    setLoadingBills(true);
+    setBillsError(null);
+    try {
+      const res = await adminBillingService.getAll({
+        status: filter || undefined,
+        limit: BILLS_LIMIT,
+        skip,
+      });
+      setBills(res.data.bills ?? []);
+    } catch {
+      setBillsError("Failed to load bills.");
+    } finally {
+      setLoadingBills(false);
+    }
+  }, []);
+
+  const fetchRuns = useCallback(async (errOnly = false) => {
+    setLoadingRuns(true);
+    setRunsError(null);
+    try {
+      const res = await adminBillingService.getRuns({
+        hasErrors: errOnly ? "true" : undefined,
+        limit: 20,
+      });
+      setRuns(res.data.runs ?? []);
+    } catch {
+      setRunsError("Failed to load billing runs.");
+    } finally {
+      setLoadingRuns(false);
+    }
+  }, []);
+
+  const fetchSummary = useCallback(async () => {
+    setLoadingSummary(true);
+    try {
+      const [unpaidRes, paidRes] = await Promise.all([
+        adminBillingService.getAll({ status: "unpaid", limit: 100 }),
+        adminBillingService.getAll({ status: "paid", limit: 100 }),
+      ]);
+      const unpaidBills = unpaidRes.data.bills ?? [];
+      const paidBills = paidRes.data.bills ?? [];
+      setSummary({
+        unpaidCount: unpaidBills.length,
+        unpaidTotal: unpaidBills.reduce((s, b) => s + (b.totalAmount ?? 0), 0),
+        overdueCount: unpaidBills.filter((b) => Date.now() > b.dueDate).length,
+        paidTotal: paidBills.reduce((s, b) => s + (b.totalAmount ?? 0), 0),
+      });
+    } catch {
+      setSummary(null);
+    } finally {
+      setLoadingSummary(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSummary();
+    fetchBills(0, statusFilter);
+    fetchRuns(errorsOnly);
+  }, []);
+
+  useEffect(() => {
+    fetchBills(billsSkip, statusFilter);
+  }, [statusFilter, billsSkip]);
+
+  useEffect(() => {
+    fetchRuns(errorsOnly);
+  }, [errorsOnly]);
+
+  const handleRefresh = () => {
+    fetchSummary();
+    fetchBills(billsSkip, statusFilter);
+    fetchRuns(errorsOnly);
+  };
+
+  return (
+    <div className="w-full min-w-0 overflow-x-hidden">
+      <div className="p-4 sm:p-6 lg:p-8">
+        <div className="max-w-6xl mx-auto min-w-0">
+          {/* ── Header ── */}
+          <div className="flex items-center justify-between gap-3 mb-6 min-w-0">
+            <div className="min-w-0">
+              <h1 className="text-lg sm:text-xl font-bold text-gray-900 leading-tight truncate">Billing Management</h1>
+              <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">
+                Manage all lab bills, payments, and billing run history
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={handleRefresh}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-xl border border-gray-200/80 transition-all"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Refresh</span>
+              </button>
+              <button
+                onClick={() => setShowGenerate(true)}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-md shadow-blue-200 transition-all"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Generate Bills</span>
+                <span className="sm:hidden">Generate</span>
+              </button>
+            </div>
+          </div>
+
+          {/* ── Summary Stats ── */}
+          {loadingSummary ? (
+            <StatsSkeleton />
+          ) : summary ? (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+              <div className="bg-white border border-gray-200/80 rounded-xl px-4 py-3 shadow-sm min-w-0">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1 truncate">Unpaid</p>
+                <p className="text-lg font-bold text-amber-600">{summary.unpaidCount}</p>
+                <p className="text-xs text-gray-400 mt-0.5 truncate">{fmt.currency(summary.unpaidTotal)}</p>
+              </div>
+              <div className="bg-white border border-gray-200/80 rounded-xl px-4 py-3 shadow-sm min-w-0">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1 truncate">Overdue</p>
+                <p className={`text-lg font-bold ${summary.overdueCount > 0 ? "text-red-600" : "text-gray-400"}`}>
+                  {summary.overdueCount}
+                </p>
+                <p className="text-xs text-gray-400 mt-0.5">past due</p>
+              </div>
+              <div className="bg-white border border-gray-200/80 rounded-xl px-4 py-3 shadow-sm min-w-0">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1 truncate">Collected</p>
+                <p className="text-lg font-bold text-green-700 truncate">{fmt.currency(summary.paidTotal)}</p>
+                <p className="text-xs text-gray-400 mt-0.5">total paid</p>
+              </div>
+              <div className="bg-white border border-gray-200/80 rounded-xl px-4 py-3 shadow-sm min-w-0">
+                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1 truncate">Runs</p>
+                <p className="text-lg font-bold text-gray-800">{runs.length}</p>
+                <p className="text-xs text-gray-400 mt-0.5">{runs.filter((r) => r.hasErrors).length} with errors</p>
+              </div>
+            </div>
+          ) : null}
+
+          {/* ── Tabs ── */}
+          <div className="flex items-center gap-1 p-1 bg-gray-100/80 rounded-xl w-fit mb-5">
+            <Tab
+              active={tab === "bills"}
+              onClick={() => setTab("bills")}
+              icon={CreditCard}
+              label="Bills"
+              count={bills.length}
+            />
+            <Tab
+              active={tab === "runs"}
+              onClick={() => setTab("runs")}
+              icon={Activity}
+              label="Runs"
+              count={runs.length}
+            />
+          </div>
+
+          {/* ── Bills Tab ── */}
+          {tab === "bills" && (
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1 scrollbar-none">
+                <Filter className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                {["", "unpaid", "paid", "free"].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => {
+                      setStatusFilter(s);
+                      setBillsSkip(0);
+                    }}
+                    className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                      statusFilter === s
+                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                        : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
+                    }`}
+                  >
+                    {s === "" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              {loadingBills ? (
+                <TableSkeleton rows={6} />
+              ) : billsError ? (
+                <div className="flex items-center gap-3 px-5 py-4 bg-red-50 border border-red-200 rounded-2xl">
+                  <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium text-red-800">{billsError}</p>
+                    <button
+                      onClick={() => fetchBills(billsSkip, statusFilter)}
+                      className="text-xs text-red-600 hover:underline mt-0.5"
+                    >
+                      Try again
+                    </button>
+                  </div>
+                </div>
+              ) : bills.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-14 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                  <FileText className="w-8 h-8 text-gray-300 mb-3" />
+                  <p className="text-sm font-medium text-gray-500">No bills found</p>
+                  <p className="text-xs text-gray-400 mt-1">Try changing the filter or generate bills first</p>
+                </div>
+              ) : (
+                <div className="border border-gray-200/80 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="w-full overflow-x-auto">
+                    <table className="text-left border-collapse" style={{ minWidth: "480px", width: "100%" }}>
+                      <thead>
+                        <tr className="bg-gray-50/80 border-b border-gray-200/80">
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Lab</th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Amount
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Status
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">
+                            Period
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Action
+                          </th>
+                          <th className="px-3 py-3 w-8" />
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {bills.map((bill) => (
+                          <BillRow key={bill._id} bill={bill} onPaySuccess={handleRefresh} />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50/50">
+                    <p className="text-xs text-gray-500">
+                      {billsSkip + 1}–{billsSkip + bills.length}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setBillsSkip(Math.max(0, billsSkip - BILLS_LIMIT))}
+                        disabled={billsSkip === 0}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 text-gray-600 hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        onClick={() => setBillsSkip(billsSkip + BILLS_LIMIT)}
+                        disabled={bills.length < BILLS_LIMIT}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 text-gray-600 hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Runs Tab ── */}
+          {tab === "runs" && (
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 mb-4">
+                <button
+                  onClick={() => setErrorsOnly((v) => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                    errorsOnly
+                      ? "bg-red-600 text-white border-red-600"
+                      : "bg-white text-gray-600 border-gray-200 hover:border-red-300"
+                  }`}
+                >
+                  <AlertTriangle className="w-3 h-3" />
+                  Errors only
+                </button>
+              </div>
+
+              {loadingRuns ? (
+                <TableSkeleton rows={5} />
+              ) : runsError ? (
+                <div className="flex items-center gap-3 px-5 py-4 bg-red-50 border border-red-200 rounded-2xl">
+                  <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium text-red-800">{runsError}</p>
+                    <button
+                      onClick={() => fetchRuns(errorsOnly)}
+                      className="text-xs text-red-600 hover:underline mt-0.5"
+                    >
+                      Try again
+                    </button>
+                  </div>
+                </div>
+              ) : runs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-14 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                  <Activity className="w-8 h-8 text-gray-300 mb-3" />
+                  <p className="text-sm font-medium text-gray-500">No billing runs yet</p>
+                  <p className="text-xs text-gray-400 mt-1">Runs appear here after bills are generated</p>
+                </div>
+              ) : (
+                <div className="border border-gray-200/80 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="w-full overflow-x-auto">
+                    <table className="text-left border-collapse" style={{ minWidth: "420px", width: "100%" }}>
+                      <thead>
+                        <tr className="bg-gray-50/80 border-b border-gray-200/80">
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Period
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Results
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Health
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">
+                            Source
+                          </th>
+                          <th className="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                            Action
+                          </th>
+                          <th className="px-3 py-3 w-8" />
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {runs.map((run) => (
+                          <RunRow key={run._id} run={run} onRetry={handleRefresh} />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {showGenerate && (
+        <GenerateModal
+          onClose={() => setShowGenerate(false)}
+          onSuccess={() => {
+            setShowGenerate(false);
+            handleRefresh();
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+export default AdminBilling;
+
