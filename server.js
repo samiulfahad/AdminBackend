@@ -1,3 +1,5 @@
+// ── server.js  (admin backend) ────────────────────────────────────────────────
+
 import "dotenv/config";
 
 import Fastify from "fastify";
@@ -20,9 +22,7 @@ const fastify = Fastify({
   logger: {
     transport: {
       target: "pino-pretty",
-      options: {
-        ignore: "pid,hostname,level,time,reqId,req,res,responseTime",
-      },
+      options: { ignore: "pid,hostname,level,time,reqId,req,res,responseTime" },
     },
   },
 });
@@ -51,7 +51,7 @@ fastify.register(billingRoutes, { prefix: API });
 // ── Health check ──────────────────────────────────────────────────────────────
 fastify.get("/health", async () => ({ status: "ok" }));
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+// ── Start server ──────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 
@@ -62,57 +62,30 @@ try {
   process.exit(1);
 }
 
-// ── Billing Cron ──────────────────────────────────────────────────────────────
+// ── Billing cron ──────────────────────────────────────────────────────────────
+// Runs at 00:05 BST on the 1st of every month.
+//   - Generates bills for the PREVIOUS month (postpaid model).
+//   - Example: fires 2026-05-01 00:05 BST → bills April 2026.
+//   - December bills are generated on January 1st — handled automatically.
 //
-// Fires at 12:05 AM BST on the 1st of every month.
-// At that point the previous month has just ended in Bangladesh,
-// so previousBSTMonth() in generateMonthlyBills will correctly return it.
+// If the cron run fails, use POST /api/v1/billing/generate from the admin UI
+// to trigger manually, optionally with a custom year/month and due date.
 //
-// node-cron timezone: "Asia/Dhaka" handles DST-safe scheduling.
-// No manual UTC offset math is needed here.
-//
-// Schedule format: "minute hour day month weekday"
-//   "5 0 1 * *" = 00:05 on the 1st of every month (Dhaka time)
-//
-// Override via env: BILLING_CRON_SCHEDULE="5 0 1 * *"
-//
-// Retry logic: if the cron fails, the billingRuns document will have hasErrors=true
-// and failed labs can be retried via POST /billing/runs/:runId/retry-failed.
-// If the entire run fails (e.g. DB down), re-trigger manually via POST /billing/generate.
+// Schedule: "5 0 1 * *"  =  minute 5, hour 0, day 1 of month, every month
+// Override via BILLING_CRON_SCHEDULE env var if needed.
 
-const cronSchedule = process.env.BILLING_CRON_SCHEDULE || "5 0 1 * *";
+const cronSchedule = process.env.BILLING_CRON_SCHEDULE ?? "5 0 1 * *";
 
 cron.schedule(
   cronSchedule,
   async () => {
-    fastify.log.info("[cron] Starting monthly billing job");
+    fastify.log.info("[cron] Monthly billing job starting");
     try {
       const result = await generateMonthlyBills(fastify.mongo.db, { triggeredBy: "cron" });
-      fastify.log.info(
-        {
-          period: result.period,
-          generated: result.generated,
-          free: result.free,
-          skipped: result.skipped,
-          failedCount: result.failedCount,
-        },
-        "[cron] Billing job complete",
-      );
-
-      if (result.hasErrors) {
-        fastify.log.warn(
-          { failedLabs: result.failedLabs },
-          `[cron] ${result.failedCount} lab(s) failed — retry via POST /billing/runs/:runId/retry-failed`,
-        );
-      }
+      fastify.log.info({ result }, "[cron] Monthly billing job complete");
     } catch (err) {
-      fastify.log.error({ err }, "[cron] Billing job failed entirely — trigger manually via POST /billing/generate");
+      fastify.log.error({ err }, "[cron] Monthly billing job failed — use admin UI to retry");
     }
   },
-  {
-    timezone: "Asia/Dhaka",
-    // scheduled: true by default
-  },
+  { timezone: "Asia/Dhaka" }, // Cron fires in BST; all timestamps stored UTC internally
 );
-
-fastify.log.info(`[cron] Billing cron registered: "${cronSchedule}" (Asia/Dhaka)`);

@@ -1,12 +1,15 @@
+// ── routes/billing/billing.js  (admin backend) ───────────────────────────────
+
 import toObjectId from "../../utils/db.js";
+import { nowBST, endOfDayBST, parseDateStringToBSTEndOfDay } from "../../utils/time.js";
 import { generateMonthlyBills, retryFailedLabs } from "../../jobs/generateMonthlyBills.js";
-import { endOfDayBST, bstDateStringToEndOfDayUTC, currentBSTYearMonth } from "../../utils/bstTime.js";
 
 async function billingRoutes(fastify) {
   const col = () => fastify.mongo.db.collection("billings");
   const runsCol = () => fastify.mongo.db.collection("billingRuns");
 
-  // ── GET /billing/all ─────────────────────────────────────────────────────
+  // ── GET /billing/all ──────────────────────────────────────────────────────
+  // All bills across all labs, with optional status filter + pagination.
   fastify.get(
     "/billing/all",
     {
@@ -17,85 +20,21 @@ async function billingRoutes(fastify) {
           type: "object",
           properties: {
             status: { type: "string", enum: ["unpaid", "paid", "free"] },
-            labId: { type: "string", minLength: 24, maxLength: 24 },
-            limit: { type: "integer", minimum: 1, maximum: 100 },
-            skip: { type: "integer", minimum: 0 },
+            limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+            skip: { type: "integer", minimum: 0, default: 0 },
           },
         },
       },
     },
     async (req, reply) => {
       try {
-        const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-        const skip = parseInt(req.query.skip) || 0;
+        const limit = Math.min(req.query.limit ?? 50, 100);
+        const skip = req.query.skip ?? 0;
+        const filter = req.query.status ? { status: req.query.status } : {};
 
-        const filter = {};
-        if (req.query.status) filter.status = req.query.status;
-        if (req.query.labId) filter.labId = toObjectId(req.query.labId);
-
-        const bills = await col()
-          .find(filter, {
-            projection: {
-              labId: 1,
-              labKey: 1,
-              status: 1,
-              totalAmount: 1,
-              dueDate: 1,
-              billingPeriodStart: 1,
-              billingPeriodEnd: 1,
-              invoiceCount: 1,
-              breakdown: 1,
-              paidAt: 1,
-              paidBy: 1,
-              createdAt: 1,
-            },
-          })
-          .sort({ billingPeriodStart: -1 })
-          .skip(skip)
-          .limit(limit)
-          .toArray();
-
-        return reply.send({ bills });
-      } catch (err) {
-        req.log.error(err);
-        return reply.code(500).send({ error: "Failed to fetch bills" });
-      }
-    },
-  );
-
-  // ── GET /billing/lab/:labId ──────────────────────────────────────────────
-  // View billing history for a single lab
-  fastify.get(
-    "/billing/lab/:labId",
-    {
-      schema: {
-        tags: ["Billing"],
-        summary: "Get all bills for a specific lab",
-        params: {
-          type: "object",
-          required: ["labId"],
-          properties: {
-            labId: { type: "string", minLength: 24, maxLength: 24 },
-          },
-        },
-        querystring: {
-          type: "object",
-          properties: {
-            limit: { type: "integer", minimum: 1, maximum: 100 },
-            skip: { type: "integer", minimum: 0 },
-          },
-        },
-      },
-    },
-    async (req, reply) => {
-      try {
-        const limit = Math.min(parseInt(req.query.limit) || 24, 100);
-        const skip = parseInt(req.query.skip) || 0;
-
-        const bills = await col()
-          .find(
-            { labId: toObjectId(req.params.labId) },
-            {
+        const [bills, total] = await Promise.all([
+          col()
+            .find(filter, {
               projection: {
                 labId: 1,
                 labKey: 1,
@@ -110,22 +49,163 @@ async function billingRoutes(fastify) {
                 paidBy: 1,
                 createdAt: 1,
               },
-            },
-          )
-          .sort({ billingPeriodStart: -1 })
-          .skip(skip)
-          .limit(limit)
-          .toArray();
+            })
+            .sort({ billingPeriodStart: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray(),
+          col().countDocuments(filter),
+        ]);
 
-        return reply.send({ bills });
+        return reply.send({ bills, total });
       } catch (err) {
         req.log.error(err);
-        return reply.code(500).send({ error: "Failed to fetch lab bills" });
+        return reply.code(500).send({ error: "Failed to fetch bills" });
       }
     },
   );
 
-  // ── GET /billing/runs ────────────────────────────────────────────────────
+  // ── GET /billing/lab/:labId ───────────────────────────────────────────────
+  // Billing history for a single lab (up to 24 months), newest first.
+  fastify.get(
+    "/billing/lab/:labId",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Get billing history for a specific lab",
+        params: {
+          type: "object",
+          required: ["labId"],
+          properties: {
+            labId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+        querystring: {
+          type: "object",
+          properties: {
+            status: { type: "string", enum: ["unpaid", "paid", "free"] },
+            limit: { type: "integer", minimum: 1, maximum: 24, default: 24 },
+            skip: { type: "integer", minimum: 0, default: 0 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const labId = toObjectId(req.params.labId);
+        const limit = Math.min(req.query.limit ?? 24, 24);
+        const skip = req.query.skip ?? 0;
+
+        const filter = { labId, ...(req.query.status ? { status: req.query.status } : {}) };
+
+        // Also fetch the lab info so the response is self-contained
+        const [lab, bills, total] = await Promise.all([
+          fastify.mongo.db
+            .collection("labs")
+            .findOne({ _id: labId }, { projection: { name: 1, labKey: 1, billing: 1, isActive: 1 } }),
+          col()
+            .find(filter, {
+              projection: {
+                status: 1,
+                totalAmount: 1,
+                dueDate: 1,
+                billingPeriodStart: 1,
+                billingPeriodEnd: 1,
+                invoiceCount: 1,
+                breakdown: 1,
+                paidAt: 1,
+                paidBy: 1,
+                createdAt: 1,
+              },
+            })
+            .sort({ billingPeriodStart: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray(),
+          col().countDocuments(filter),
+        ]);
+
+        if (!lab) return reply.code(404).send({ error: "Lab not found" });
+
+        return reply.send({ lab, bills, total });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch lab billing history" });
+      }
+    },
+  );
+
+  // ── GET /billing/lab/:labId/summary ──────────────────────────────────────
+  // Quick summary: current unpaid bill + totals for the lab.
+  fastify.get(
+    "/billing/lab/:labId/summary",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Unpaid bill + aggregate summary for a specific lab",
+        params: {
+          type: "object",
+          required: ["labId"],
+          properties: {
+            labId: { type: "string", minLength: 24, maxLength: 24 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const labId = toObjectId(req.params.labId);
+
+        const [lab, unpaidBill, aggregate] = await Promise.all([
+          fastify.mongo.db
+            .collection("labs")
+            .findOne({ _id: labId }, { projection: { name: 1, labKey: 1, billing: 1, isActive: 1 } }),
+
+          col().findOne({ labId, status: "unpaid" }, { sort: { billingPeriodStart: -1 } }),
+
+          col()
+            .aggregate([
+              { $match: { labId } },
+              {
+                $group: {
+                  _id: "$status",
+                  count: { $sum: 1 },
+                  total: { $sum: "$totalAmount" },
+                },
+              },
+            ])
+            .toArray(),
+        ]);
+
+        if (!lab) return reply.code(404).send({ error: "Lab not found" });
+
+        const stats = { paid: { count: 0, total: 0 }, unpaid: { count: 0, total: 0 }, free: { count: 0, total: 0 } };
+        for (const g of aggregate) {
+          if (g._id in stats) stats[g._id] = { count: g.count, total: g.total };
+        }
+
+        const currentBill = unpaidBill
+          ? {
+              id: unpaidBill._id,
+              amount: unpaidBill.totalAmount,
+              dueDate: unpaidBill.dueDate,
+              isOverdue: Date.now() > unpaidBill.dueDate,
+              billingPeriodStart: unpaidBill.billingPeriodStart,
+              billingPeriodEnd: unpaidBill.billingPeriodEnd,
+              invoiceCount: unpaidBill.invoiceCount,
+              breakdown: unpaidBill.breakdown,
+            }
+          : null;
+
+        return reply.send({ lab, currentBill, stats });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch lab billing summary" });
+      }
+    },
+  );
+
+  // ── GET /billing/runs ─────────────────────────────────────────────────────
   fastify.get(
     "/billing/runs",
     {
@@ -135,8 +215,8 @@ async function billingRoutes(fastify) {
         querystring: {
           type: "object",
           properties: {
-            limit: { type: "integer", minimum: 1, maximum: 50 },
-            skip: { type: "integer", minimum: 0 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+            skip: { type: "integer", minimum: 0, default: 0 },
             hasErrors: { type: "string", enum: ["true", "false"] },
           },
         },
@@ -144,14 +224,15 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
-        const limit = Math.min(parseInt(req.query.limit) || 20, 50);
-        const skip = parseInt(req.query.skip) || 0;
+        const limit = Math.min(req.query.limit ?? 20, 50);
+        const skip = req.query.skip ?? 0;
         const filter = req.query.hasErrors === "true" ? { hasErrors: true } : {};
 
         const runs = await runsCol()
           .find(filter, {
             projection: {
               period: 1,
+              billingPeriodStart: 1,
               triggeredBy: 1,
               triggeredAt: 1,
               totalLabs: 1,
@@ -178,13 +259,14 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── POST /billing/pay/:billingId ─────────────────────────────────────────
+  // ── POST /billing/pay/:billingId ──────────────────────────────────────────
+  // Admin marks a bill as paid; immediately unblocks the lab via cache invalidation.
   fastify.post(
     "/billing/pay/:billingId",
     {
       schema: {
         tags: ["Billing"],
-        summary: "Mark a bill as paid",
+        summary: "Mark a bill as paid (admin)",
         params: {
           type: "object",
           required: ["billingId"],
@@ -221,12 +303,12 @@ async function billingRoutes(fastify) {
           return reply.code(404).send({ error: "Bill not found or already paid" });
         }
 
-        // Best-effort cache invalidation on the client server
+        // Best-effort cache invalidation — failure is non-fatal (TTL expires in 5 min)
         fetch(`${process.env.LAB_API_INTERNAL_URL}/internal/billing/cache-invalidate/${req.body.labId}`, {
           method: "POST",
           headers: { "x-internal-secret": process.env.INTERNAL_SECRET },
         }).catch(() => {
-          req.log.warn("[billing] Could not reach lab-api to invalidate cache — expires in 5 min");
+          req.log.warn("[billing] Could not reach lab-api to invalidate billing cache — expires in ~5 min");
         });
 
         return reply.send({ success: true });
@@ -237,20 +319,29 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── POST /billing/generate ───────────────────────────────────────────────
-  // Manually trigger bill generation for a specific past month.
-  // Cannot generate for the current or future month.
+  // ── POST /billing/generate ────────────────────────────────────────────────
+  // Manually trigger bill generation. Idempotent per period.
+  //
+  // Body (all optional):
+  //   year    {number}  - BST year  (must provide both year+month or neither)
+  //   month   {number}  - BST month, 1-indexed
+  //   dueDate {string}  - "YYYY-MM-DD" in BST; defaults to DUE_DAYS from now
   fastify.post(
     "/billing/generate",
     {
       schema: {
         tags: ["Billing"],
-        summary: "Manually trigger bill generation for a past month (idempotent)",
+        summary: "Manually trigger bill generation (idempotent per period)",
         body: {
           type: "object",
           properties: {
             year: { type: "integer", minimum: 2024, maximum: 2100 },
             month: { type: "integer", minimum: 1, maximum: 12 },
+            dueDate: {
+              type: "string",
+              pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+              description: "Due date in BST, format YYYY-MM-DD. Defaults to 7 days from now.",
+            },
           },
           additionalProperties: false,
         },
@@ -258,34 +349,60 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
+        const body = req.body ?? {};
         const options = { triggeredBy: "manual" };
 
-        if (req.body?.year && req.body?.month) {
-          const requestedYear = parseInt(req.body.year);
-          const requestedMonth = parseInt(req.body.month); // 1-indexed
+        if (body.year != null || body.month != null) {
+          // Both must be supplied together
+          if (body.year == null || body.month == null) {
+            return reply.code(400).send({ error: "Both year and month must be provided together." });
+          }
 
-          // Guard: bills can only be generated for months that are fully over in BST.
-          const { year: currentYear, month: currentMonth } = currentBSTYearMonth();
+          const requestedYear = parseInt(body.year, 10);
+          const requestedMonth = parseInt(body.month, 10);
 
-          const isCurrentOrFuture =
-            requestedYear > currentYear || (requestedYear === currentYear && requestedMonth >= currentMonth);
+          // Guard: bills can only be generated for completed months (BST).
+          const bstNow = nowBST();
+          const isSameOrFuture =
+            requestedYear > bstNow.year || (requestedYear === bstNow.year && requestedMonth >= bstNow.month);
 
-          if (isCurrentOrFuture) {
+          if (isSameOrFuture) {
             return reply.code(400).send({
-              error: `Cannot generate bills for ${requestedYear}-${String(requestedMonth).padStart(2, "0")}. Bills can only be generated after the month has fully ended in BST.`,
+              error: `Cannot generate bills for ${requestedYear}-${String(requestedMonth).padStart(2, "0")}. Bills can only be generated after the month has ended (BST).`,
             });
           }
 
           options.year = requestedYear;
           options.month = requestedMonth;
         }
-        // If no year/month provided, defaults to previous BST month (same as cron)
 
+        // Parse optional manual due date
+        if (body.dueDate) {
+          try {
+            options.dueDateMs = parseDateStringToBSTEndOfDay(body.dueDate);
+          } catch (e) {
+            return reply.code(400).send({ error: e.message });
+          }
+
+          // Due date must be in the future
+          if (options.dueDateMs <= Date.now()) {
+            return reply.code(400).send({ error: "dueDate must be a future date (BST)." });
+          }
+        }
+
+        // Fire-and-forget — generation can take a while for large lab counts
         generateMonthlyBills(fastify.mongo.db, options)
           .then((result) => fastify.log.info({ result }, "[billing] Manual generation complete"))
           .catch((err) => fastify.log.error({ err }, "[billing] Manual generation failed"));
 
-        return reply.send({ message: "Bill generation started", options });
+        return reply.send({
+          message: "Bill generation started",
+          options: {
+            year: options.year ?? "auto (previous BST month)",
+            month: options.month ?? "auto (previous BST month)",
+            dueDate: body.dueDate ?? `${process.env.BILLING_DUE_DAYS ?? 7} days from now (end of day BST)`,
+          },
+        });
       } catch (err) {
         req.log.error(err);
         return reply.code(500).send({ error: "Failed to start bill generation" });
@@ -294,16 +411,14 @@ async function billingRoutes(fastify) {
   );
 
   // ── PATCH /billing/:billingId/due-date ────────────────────────────────────
-  // Update due date of an unpaid bill.
-  // Body: { dueDate: "YYYY-MM-DD" } — a BST calendar date string.
-  // The backend converts it to 23:59:59.999 BST = 17:59:59.999 UTC of that day.
-  // Max extension: +10 days beyond current due date (measured in BST calendar days).
+  // Update the due date of an unpaid bill. Max +10 days from current due date.
+  // Body: { dueDate: "YYYY-MM-DD" }  — interpreted as BST.
   fastify.patch(
     "/billing/:billingId/due-date",
     {
       schema: {
         tags: ["Billing"],
-        summary: "Update the due date of an unpaid bill",
+        summary: "Extend the due date of an unpaid bill (max +10 days from current due date, BST)",
         params: {
           type: "object",
           required: ["billingId"],
@@ -315,11 +430,10 @@ async function billingRoutes(fastify) {
           type: "object",
           required: ["dueDate"],
           properties: {
-            // Accept a "YYYY-MM-DD" BST date string from the frontend
             dueDate: {
               type: "string",
               pattern: "^\\d{4}-\\d{2}-\\d{2}$",
-              description: "BST calendar date string YYYY-MM-DD",
+              description: "New due date in BST, format YYYY-MM-DD.",
             },
           },
           additionalProperties: false,
@@ -328,37 +442,42 @@ async function billingRoutes(fastify) {
     },
     async (req, reply) => {
       try {
-        const bill = await col().findOne(
-          { _id: toObjectId(req.params.billingId), status: "unpaid" },
-          { projection: { dueDate: 1 } },
-        );
-
-        if (!bill) {
-          return reply.code(404).send({ error: "Bill not found or is not unpaid." });
+        // Parse submitted date as 23:59:59.999 BST → UTC ms
+        let newDueDateMs;
+        try {
+          newDueDateMs = parseDateStringToBSTEndOfDay(req.body.dueDate);
+        } catch (e) {
+          return reply.code(400).send({ error: e.message });
         }
-
-        // Convert the chosen BST date to end-of-day UTC
-        const newDueDateMs = bstDateStringToEndOfDayUTC(req.body.dueDate);
 
         if (newDueDateMs <= Date.now()) {
-          return reply.code(400).send({ error: "Due date must be in the future." });
+          return reply.code(400).send({ error: "Due date must be in the future (BST)." });
         }
 
+        const bill = await col().findOne(
+          { _id: toObjectId(req.params.billingId), status: "unpaid" },
+          { projection: { dueDate: 1, labId: 1 } },
+        );
+
+        if (!bill) return reply.code(404).send({ error: "Bill not found or is not unpaid." });
+
         const MAX_EXTENSION_MS = 10 * 24 * 60 * 60 * 1000;
-        const maxAllowedMs = bill.dueDate + MAX_EXTENSION_MS;
+        // maxAllowed is snapped to end-of-day BST too, for consistency
+        const maxAllowedMs = endOfDayBST(bill.dueDate + MAX_EXTENSION_MS);
 
         if (newDueDateMs > maxAllowedMs) {
-          // Return the max date as a BST string so frontend can show it clearly
+          // Return the max date in YYYY-MM-DD BST for the UI
           const maxBSTDate = new Date(maxAllowedMs + 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
           return reply.code(400).send({
-            error: `Due date cannot be more than 10 days beyond the current due date (${maxBSTDate} BST).`,
+            error: `Due date cannot be more than 10 days beyond the current due date. Max allowed: ${maxBSTDate} (BST).`,
             maxAllowed: maxAllowedMs,
+            maxAllowedBSTDate: maxBSTDate,
           });
         }
 
         await col().updateOne({ _id: toObjectId(req.params.billingId) }, { $set: { dueDate: newDueDateMs } });
 
-        return reply.send({ success: true, dueDate: newDueDateMs });
+        return reply.send({ success: true, dueDate: newDueDateMs, dueDateBST: req.body.dueDate });
       } catch (err) {
         req.log.error(err);
         return reply.code(500).send({ error: "Failed to update due date." });
@@ -386,11 +505,14 @@ async function billingRoutes(fastify) {
       try {
         const run = await runsCol().findOne(
           { _id: toObjectId(req.params.runId) },
-          { projection: { failedLabs: 1, periodStart: 1, period: 1 } },
+          { projection: { failedLabs: 1, billingPeriodStart: 1, period: 1 } },
         );
 
         if (!run) return reply.code(404).send({ error: "Run not found" });
-        if (!run.failedLabs?.length) return reply.send({ message: "No failed labs in this run" });
+
+        if (!run.failedLabs?.length) {
+          return reply.send({ message: "No failed labs in this run" });
+        }
 
         retryFailedLabs(fastify.mongo.db, run)
           .then((result) => fastify.log.info({ result }, "[billing] Retry complete"))
