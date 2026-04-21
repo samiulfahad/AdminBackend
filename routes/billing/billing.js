@@ -538,6 +538,89 @@ async function billingRoutes(fastify) {
       }
     },
   );
+
+  // ── ADD THIS ROUTE to billing.js (inside billingRoutes function) ───────────────
+  //
+  // GET /billing/month-overview
+  // Returns all billing periods grouped by month with paid/unpaid/free counts + totals.
+  // Used by the new "Month Overview" tab in AdminBilling.jsx.
+
+  fastify.get(
+    "/billing/month-overview",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "All billing periods grouped by month — paid/unpaid/free counts and totals",
+      },
+    },
+    async (req, reply) => {
+      try {
+        const pipeline = [
+          // Group by billingPeriodStart (each period is one month), then by status
+          {
+            $group: {
+              _id: {
+                periodStart: "$billingPeriodStart",
+                status: "$status",
+              },
+              count: { $sum: 1 },
+              total: { $sum: "$totalAmount" },
+            },
+          },
+          // Reshape: one doc per period with paid/unpaid/free sub-objects
+          {
+            $group: {
+              _id: "$_id.periodStart",
+              statuses: {
+                $push: {
+                  status: "$_id.status",
+                  count: "$count",
+                  total: "$total",
+                },
+              },
+            },
+          },
+          { $sort: { _id: -1 } }, // newest first
+        ];
+
+        const raw = await col().aggregate(pipeline).toArray();
+
+        const MONTH_FMT = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" });
+
+        const months = raw.map((doc) => {
+          const periodStart = doc._id; // UTC ms
+          const date = new Date(periodStart);
+
+          // Build status map
+          const stats = { paid: { count: 0, total: 0 }, unpaid: { count: 0, total: 0 }, free: { count: 0, total: 0 } };
+          for (const s of doc.statuses) {
+            if (s.status in stats) stats[s.status] = { count: s.count, total: s.total };
+          }
+
+          // BST year: shift by +6h to get BST date, then read UTC year/month
+          const bstMs = periodStart + 6 * 60 * 60 * 1000;
+          const bstDate = new Date(bstMs);
+
+          return {
+            period: `${bstDate.getUTCFullYear()}-${String(bstDate.getUTCMonth() + 1).padStart(2, "0")}`,
+            label: MONTH_FMT.format(date),
+            year: bstDate.getUTCFullYear(),
+            month: bstDate.getUTCMonth() + 1, // 1-indexed
+            periodStart,
+            totalLabs: stats.paid.count + stats.unpaid.count + stats.free.count,
+            paid: stats.paid,
+            unpaid: stats.unpaid,
+            free: stats.free,
+          };
+        });
+
+        return reply.send({ months });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch monthly billing overview" });
+      }
+    },
+  );
 }
 
 export default billingRoutes;
