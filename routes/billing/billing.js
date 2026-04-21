@@ -621,6 +621,97 @@ async function billingRoutes(fastify) {
       }
     },
   );
+
+  // ── ADD THIS ROUTE to billing.js (inside billingRoutes function) ──────────────
+  //
+  // GET /billing/period-bills
+  // Returns all bills for a specific billingPeriodStart, joined with lab info.
+  // Used by the Month Overview tab drill-down in AdminBilling.jsx.
+  //
+  // Query params:
+  //   periodStart  (integer, required) — the billingPeriodStart timestamp in ms
+  //   skip         (integer, default 0)
+  //   limit        (integer, default 30, max 100)
+  //   status       (string, optional) — filter by "paid" | "unpaid" | "free"
+
+  fastify.get(
+    "/billing/period-bills",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "All bills for a specific period — with lab name, status, amount",
+        querystring: {
+          type: "object",
+          required: ["periodStart"],
+          properties: {
+            periodStart: { type: "integer" },
+            skip: { type: "integer", minimum: 0, default: 0 },
+            limit: { type: "integer", minimum: 1, maximum: 100, default: 30 },
+            status: { type: "string", enum: ["paid", "unpaid", "free"] },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const periodStart = parseInt(req.query.periodStart, 10);
+        if (!Number.isFinite(periodStart)) {
+          return reply.code(400).send({ error: "periodStart must be a valid integer timestamp" });
+        }
+
+        const limit = Math.min(req.query.limit ?? 30, 100);
+        const skip = req.query.skip ?? 0;
+
+        const matchStage = { billingPeriodStart: periodStart };
+        if (req.query.status) matchStage.status = req.query.status;
+
+        const pipeline = [
+          { $match: matchStage },
+          {
+            $lookup: {
+              from: "labs",
+              localField: "labId",
+              foreignField: "_id",
+              as: "labDoc",
+              pipeline: [{ $project: { name: 1, labKey: 1, isActive: 1 } }],
+            },
+          },
+          { $unwind: { path: "$labDoc", preserveNullAndEmptyArrays: true } },
+          {
+            $project: {
+              status: 1,
+              totalAmount: 1,
+              dueDate: 1,
+              paidAt: 1,
+              invoiceCount: 1,
+              billingPeriodStart: 1,
+              billingPeriodEnd: 1,
+              labName: { $ifNull: ["$labDoc.name", "Unknown"] },
+              labKey: { $ifNull: ["$labDoc.labKey", null] },
+              isActive: { $ifNull: ["$labDoc.isActive", false] },
+            },
+          },
+          { $sort: { status: 1, totalAmount: -1 } }, // unpaid first, then by amount desc
+          {
+            $facet: {
+              total: [{ $count: "n" }],
+              bills: [{ $skip: skip }, { $limit: limit }],
+            },
+          },
+        ];
+
+        const [result] = await col().aggregate(pipeline).toArray();
+
+        return reply.send({
+          bills: result?.bills ?? [],
+          total: result?.total?.[0]?.n ?? 0,
+        });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch period bills" });
+      }
+    },
+  );
 }
 
 export default billingRoutes;
