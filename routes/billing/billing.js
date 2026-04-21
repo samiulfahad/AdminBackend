@@ -1,50 +1,12 @@
-// ── routes/admin/billingRoutes.js ────────────────────────────────────────────
-//
-// Admin-side billing routes.
-// All timestamps stored as UTC ms. "BST" = Asia/Dhaka = UTC+6.
-//
-// Due-date rule: always snapped to 23:59:59.999 BST = 17:59:59.999 UTC.
-
 import toObjectId from "../../utils/db.js";
 import { generateMonthlyBills, retryFailedLabs } from "../../jobs/generateMonthlyBills.js";
-
-const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
-
-/**
- * Snap a UTC ms timestamp to 23:59:59.999 on the **same BST calendar day**.
- * Used when the admin picks a date string like "2025-05-07" and we must store
- * the correct UTC deadline.
- *
- * @param {string} dateStr  "YYYY-MM-DD" in BST
- * @returns {number} UTC ms
- */
-function dueDateFromBSTDateString(dateStr) {
-  // Parse as midnight UTC, then add 6 h to get midnight BST,
-  // then set to 23:59:59.999 BST by adding 17h 59m 59s 999ms more.
-  // Simpler: just build Date.UTC with the date components + 17:59:59.999
-  const [y, mo, d] = dateStr.split("-").map(Number);
-  // 23:59:59.999 BST  =  17:59:59.999 UTC  (BST is UTC+6)
-  return Date.UTC(y, mo - 1, d, 17, 59, 59, 999);
-}
-
-/**
- * Returns true if the given { year, month } (1-indexed) is the current or a
- * future month in BST.
- */
-function isCurrentOrFutureMonthBST(year, month) {
-  const nowBst = new Date(Date.now() + DHAKA_OFFSET_MS);
-  const curYear = nowBst.getUTCFullYear();
-  const curMon = nowBst.getUTCMonth() + 1; // 1-indexed
-  return year > curYear || (year === curYear && month >= curMon);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+import { endOfDayBST, bstDateStringToEndOfDayUTC, currentBSTYearMonth } from "../../utils/bstTime.js";
 
 async function billingRoutes(fastify) {
   const col = () => fastify.mongo.db.collection("billings");
   const runsCol = () => fastify.mongo.db.collection("billingRuns");
 
-  // ── GET /billing/all ───────────────────────────────────────────────────────
+  // ── GET /billing/all ─────────────────────────────────────────────────────
   fastify.get(
     "/billing/all",
     {
@@ -66,6 +28,7 @@ async function billingRoutes(fastify) {
       try {
         const limit = Math.min(parseInt(req.query.limit) || 50, 100);
         const skip = parseInt(req.query.skip) || 0;
+
         const filter = {};
         if (req.query.status) filter.status = req.query.status;
         if (req.query.labId) filter.labId = toObjectId(req.query.labId);
@@ -100,7 +63,8 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── GET /billing/lab/:labId ────────────────────────────────────────────────
+  // ── GET /billing/lab/:labId ──────────────────────────────────────────────
+  // View billing history for a single lab
   fastify.get(
     "/billing/lab/:labId",
     {
@@ -161,7 +125,7 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── GET /billing/runs ──────────────────────────────────────────────────────
+  // ── GET /billing/runs ────────────────────────────────────────────────────
   fastify.get(
     "/billing/runs",
     {
@@ -214,7 +178,7 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── POST /billing/pay/:billingId ───────────────────────────────────────────
+  // ── POST /billing/pay/:billingId ─────────────────────────────────────────
   fastify.post(
     "/billing/pay/:billingId",
     {
@@ -234,6 +198,7 @@ async function billingRoutes(fastify) {
           properties: {
             labId: { type: "string", minLength: 24, maxLength: 24 },
           },
+          additionalProperties: false,
         },
       },
     },
@@ -256,7 +221,7 @@ async function billingRoutes(fastify) {
           return reply.code(404).send({ error: "Bill not found or already paid" });
         }
 
-        // Fire-and-forget: invalidate the billing guard cache in the lab server
+        // Best-effort cache invalidation on the client server
         fetch(`${process.env.LAB_API_INTERNAL_URL}/internal/billing/cache-invalidate/${req.body.labId}`, {
           method: "POST",
           headers: { "x-internal-secret": process.env.INTERNAL_SECRET },
@@ -272,9 +237,9 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── POST /billing/generate ─────────────────────────────────────────────────
-  // Manual trigger. Body may include { year, month } (1-indexed).
-  // Guard: cannot generate for the current or a future BST month.
+  // ── POST /billing/generate ───────────────────────────────────────────────
+  // Manually trigger bill generation for a specific past month.
+  // Cannot generate for the current or future month.
   fastify.post(
     "/billing/generate",
     {
@@ -287,6 +252,7 @@ async function billingRoutes(fastify) {
             year: { type: "integer", minimum: 2024, maximum: 2100 },
             month: { type: "integer", minimum: 1, maximum: 12 },
           },
+          additionalProperties: false,
         },
       },
     },
@@ -298,16 +264,22 @@ async function billingRoutes(fastify) {
           const requestedYear = parseInt(req.body.year);
           const requestedMonth = parseInt(req.body.month); // 1-indexed
 
-          if (isCurrentOrFutureMonthBST(requestedYear, requestedMonth)) {
+          // Guard: bills can only be generated for months that are fully over in BST.
+          const { year: currentYear, month: currentMonth } = currentBSTYearMonth();
+
+          const isCurrentOrFuture =
+            requestedYear > currentYear || (requestedYear === currentYear && requestedMonth >= currentMonth);
+
+          if (isCurrentOrFuture) {
             return reply.code(400).send({
-              error: `Cannot generate bills for ${requestedYear}-${String(requestedMonth).padStart(2, "0")}. Bills can only be generated after the month has fully ended (BST).`,
+              error: `Cannot generate bills for ${requestedYear}-${String(requestedMonth).padStart(2, "0")}. Bills can only be generated after the month has fully ended in BST.`,
             });
           }
 
           options.year = requestedYear;
           options.month = requestedMonth;
         }
-        // If no year/month provided, the job defaults to previousBSTMonth()
+        // If no year/month provided, defaults to previous BST month (same as cron)
 
         generateMonthlyBills(fastify.mongo.db, options)
           .then((result) => fastify.log.info({ result }, "[billing] Manual generation complete"))
@@ -321,16 +293,17 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── PATCH /billing/:billingId/due-date ─────────────────────────────────────
-  // Body: { dueDate: "YYYY-MM-DD" }  (BST calendar date picked by admin)
-  // The date is always stored as 23:59:59.999 BST = 17:59:59.999 UTC.
-  // Max extension: +10 days from current dueDate.
+  // ── PATCH /billing/:billingId/due-date ────────────────────────────────────
+  // Update due date of an unpaid bill.
+  // Body: { dueDate: "YYYY-MM-DD" } — a BST calendar date string.
+  // The backend converts it to 23:59:59.999 BST = 17:59:59.999 UTC of that day.
+  // Max extension: +10 days beyond current due date (measured in BST calendar days).
   fastify.patch(
     "/billing/:billingId/due-date",
     {
       schema: {
         tags: ["Billing"],
-        summary: "Update the due date of an unpaid bill (accepts BST date string YYYY-MM-DD)",
+        summary: "Update the due date of an unpaid bill",
         params: {
           type: "object",
           required: ["billingId"],
@@ -342,13 +315,11 @@ async function billingRoutes(fastify) {
           type: "object",
           required: ["dueDate"],
           properties: {
-            // Accept either a YYYY-MM-DD string OR a UTC ms integer for
-            // backwards-compat with any existing callers.
+            // Accept a "YYYY-MM-DD" BST date string from the frontend
             dueDate: {
-              oneOf: [
-                { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
-                { type: "integer", minimum: 1 },
-              ],
+              type: "string",
+              pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+              description: "BST calendar date string YYYY-MM-DD",
             },
           },
           additionalProperties: false,
@@ -366,30 +337,22 @@ async function billingRoutes(fastify) {
           return reply.code(404).send({ error: "Bill not found or is not unpaid." });
         }
 
-        // Normalise incoming value to UTC ms snapped to 23:59:59 BST
-        let newDueDateMs;
-        if (typeof req.body.dueDate === "string") {
-          newDueDateMs = dueDateFromBSTDateString(req.body.dueDate);
-        } else {
-          // Legacy integer path: snap to end-of-BST-day of whatever day it falls on
-          const bstDay = new Date(req.body.dueDate + DHAKA_OFFSET_MS);
-          const dateStr = bstDay.toISOString().slice(0, 10);
-          newDueDateMs = dueDateFromBSTDateString(dateStr);
-        }
+        // Convert the chosen BST date to end-of-day UTC
+        const newDueDateMs = bstDateStringToEndOfDayUTC(req.body.dueDate);
 
         if (newDueDateMs <= Date.now()) {
           return reply.code(400).send({ error: "Due date must be in the future." });
         }
 
         const MAX_EXTENSION_MS = 10 * 24 * 60 * 60 * 1000;
-        const maxAllowed = bill.dueDate + MAX_EXTENSION_MS;
+        const maxAllowedMs = bill.dueDate + MAX_EXTENSION_MS;
 
-        if (newDueDateMs > maxAllowed) {
-          // Display maxAllowed as BST date for error message
-          const maxBst = new Date(maxAllowed + DHAKA_OFFSET_MS).toISOString().slice(0, 10);
+        if (newDueDateMs > maxAllowedMs) {
+          // Return the max date as a BST string so frontend can show it clearly
+          const maxBSTDate = new Date(maxAllowedMs + 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
           return reply.code(400).send({
-            error: `Due date cannot be more than 10 days beyond the current due date (${maxBst} BST).`,
-            maxAllowed, // UTC ms — frontend can use this too
+            error: `Due date cannot be more than 10 days beyond the current due date (${maxBSTDate} BST).`,
+            maxAllowed: maxAllowedMs,
           });
         }
 
@@ -403,7 +366,7 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── POST /billing/runs/:runId/retry-failed ─────────────────────────────────
+  // ── POST /billing/runs/:runId/retry-failed ────────────────────────────────
   fastify.post(
     "/billing/runs/:runId/retry-failed",
     {

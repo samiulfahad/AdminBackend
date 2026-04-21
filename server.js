@@ -36,7 +36,6 @@ await fastify.register(cors, {
 // ── Plugins ───────────────────────────────────────────────────────────────────
 await fastify.register(mongoPlugin);
 
-
 // ── Routes ────────────────────────────────────────────────────────────────────
 const API = "/api/v1";
 
@@ -63,18 +62,57 @@ try {
   process.exit(1);
 }
 
+// ── Billing Cron ──────────────────────────────────────────────────────────────
+//
+// Fires at 12:05 AM BST on the 1st of every month.
+// At that point the previous month has just ended in Bangladesh,
+// so previousBSTMonth() in generateMonthlyBills will correctly return it.
+//
+// node-cron timezone: "Asia/Dhaka" handles DST-safe scheduling.
+// No manual UTC offset math is needed here.
+//
+// Schedule format: "minute hour day month weekday"
+//   "5 0 1 * *" = 00:05 on the 1st of every month (Dhaka time)
+//
+// Override via env: BILLING_CRON_SCHEDULE="5 0 1 * *"
+//
+// Retry logic: if the cron fails, the billingRuns document will have hasErrors=true
+// and failed labs can be retried via POST /billing/runs/:runId/retry-failed.
+// If the entire run fails (e.g. DB down), re-trigger manually via POST /billing/generate.
 
-const cronSchedule = process.env.BILLING_CRON_SCHEDULE || "1 0 1 * *";
+const cronSchedule = process.env.BILLING_CRON_SCHEDULE || "5 0 1 * *";
+
 cron.schedule(
   cronSchedule,
   async () => {
-    fastify.log.info("[cron] Starting billing job");
+    fastify.log.info("[cron] Starting monthly billing job");
     try {
-      const result = await generateMonthlyBills(fastify.mongo.db);
-      fastify.log.info({ result }, "[cron] Billing job complete");
+      const result = await generateMonthlyBills(fastify.mongo.db, { triggeredBy: "cron" });
+      fastify.log.info(
+        {
+          period: result.period,
+          generated: result.generated,
+          free: result.free,
+          skipped: result.skipped,
+          failedCount: result.failedCount,
+        },
+        "[cron] Billing job complete",
+      );
+
+      if (result.hasErrors) {
+        fastify.log.warn(
+          { failedLabs: result.failedLabs },
+          `[cron] ${result.failedCount} lab(s) failed — retry via POST /billing/runs/:runId/retry-failed`,
+        );
+      }
     } catch (err) {
-      fastify.log.error({ err }, "[cron] Billing job failed");
+      fastify.log.error({ err }, "[cron] Billing job failed entirely — trigger manually via POST /billing/generate");
     }
   },
-  { timezone: "Asia/Dhaka" },
+  {
+    timezone: "Asia/Dhaka",
+    // scheduled: true by default
+  },
 );
+
+fastify.log.info(`[cron] Billing cron registered: "${cronSchedule}" (Asia/Dhaka)`);

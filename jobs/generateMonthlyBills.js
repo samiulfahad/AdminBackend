@@ -1,101 +1,84 @@
-// ── jobs/generateMonthlyBills.js ─────────────────────────────────────────────
-//
-// All dates stored as UTC milliseconds in MongoDB.
-// "BST" here means Bangladesh Standard Time = UTC+6 (Asia/Dhaka).
-//
-// Key rules:
-//  • periodStart / periodEnd are UTC Date objects representing midnight UTC on
-//    the 1st of the billing month (pure calendar boundaries, no timezone offset
-//    needed because invoice.createdAt is already UTC ms).
-//  • dueDate is stored as UTC ms but always snapped to 23:59:59.999 BST of the
-//    target day  →  17:59:59.999 UTC  (BST = UTC+6, so 23:59 BST = 17:59 UTC).
-//  • The cron fires at 00:05 BST on the 1st of every month.  In UTC that is
-//    18:05 on the last day of the previous month  →  schedule "5 18 * * *" UTC
-//    OR use { timezone: 'Asia/Dhaka' } and schedule "5 0 * * *".
+import { endOfDayBST, previousBSTMonth, buildPeriod } from "../utils/bstTime.js";
 
-const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000; // UTC+6
+const DEFAULT_DUE_DAYS = 7;
 
-/**
- * Returns the UTC timestamp for 23:59:59.999 BST on the date that is
- * `daysFromNow` days after the day containing `baseUtcMs` (in BST).
- *
- * Example: baseUtcMs = now, daysFromNow = 7
- *   → end-of-day BST, 7 days from today BST.
- */
-function endOfDayBST(baseUtcMs, daysFromNow = 0) {
-  // Convert base to BST "calendar day"
-  const bstNow = new Date(baseUtcMs + DHAKA_OFFSET_MS);
-  // Advance by daysFromNow
-  const targetBst = new Date(
-    Date.UTC(
-      bstNow.getUTCFullYear(),
-      bstNow.getUTCMonth(),
-      bstNow.getUTCDate() + daysFromNow,
-      // 23:59:59.999 BST  =  17:59:59.999 UTC  (subtract 6 h)
-      17,
-      59,
-      59,
-      999,
-    ),
-  );
-  return targetBst.getTime();
+// ─── Core bill-generation logic for a single lab ──────────────────────────────
+
+async function generateBillForLab(db, lab, periodStart, periodEnd, periodEndDisplay, dueDate, nowUtc) {
+  const exists = await db
+    .collection("billings")
+    .findOne({ labId: lab._id, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
+
+  if (exists) return { result: "skipped" };
+
+  const monthlyFee = lab.billing?.monthlyFee ?? 0;
+  const perInvoiceFee = lab.billing?.perInvoiceFee ?? 0;
+  const commission = lab.billing?.commission ?? 0;
+
+  const invoiceCount = await db.collection("invoices").countDocuments({
+    labId: lab._id,
+    "deletion.status": { $ne: true },
+    createdAt: {
+      $gte: periodStart.getTime(),
+      $lt: periodEnd.getTime(),
+    },
+  });
+
+  const perInvoiceNet = perInvoiceFee - commission;
+  const totalAmount = monthlyFee + perInvoiceNet * invoiceCount;
+  const isFree = totalAmount <= 0;
+
+  await db.collection("billings").insertOne({
+    labId: lab._id,
+    labKey: lab.labKey,
+    billingPeriodStart: periodStart,
+    billingPeriodEnd: periodEndDisplay,
+    invoiceCount,
+    breakdown: {
+      monthlyFee,
+      perInvoiceFee,
+      commission,
+      perInvoiceNet,
+    },
+    totalAmount: isFree ? 0 : totalAmount,
+    status: isFree ? "free" : "unpaid",
+    // dueDate is stored as UTC ms = end of due day 23:59:59.999 BST
+    dueDate: isFree ? null : dueDate,
+    createdAt: nowUtc,
+    paidAt: null,
+    paidBy: null,
+  });
+
+  return { result: isFree ? "free" : "generated" };
 }
 
-/**
- * Given "now" in UTC ms, return { y, m } (1-indexed month) for the billing
- * period = the previous calendar month in BST.
- *
- * The cron fires at 00:05 BST on the 1st, so "current BST month" is the new
- * month; we want the one before it.
- */
-function previousBSTMonth(nowUtcMs) {
-  const nowBst = new Date(nowUtcMs + DHAKA_OFFSET_MS);
-  let y = nowBst.getUTCFullYear();
-  let m = nowBst.getUTCMonth() + 1; // 1-indexed current BST month
-
-  // Step back one month
-  if (m === 1) {
-    m = 12;
-    y -= 1;
-  } else {
-    m -= 1;
-  }
-  return { y, m };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Main export: generate bills for all labs for a billing period ─────────────
+//
+// options.year + options.month (1-indexed): generate for that specific past month.
+// Otherwise: auto-detect the previous BST month (postpaid billing).
+// options.triggeredBy: "cron" | "manual"
 
 export async function generateMonthlyBills(db, options = {}) {
-  const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || 7;
   const nowUtc = Date.now();
-
-  // ── Determine billing period ──────────────────────────────────────────────
-  let y, m; // year and 1-indexed month of the period to bill
-  if (options.year && options.month) {
-    y = options.year;
-    m = options.month; // caller already validated this is a past month
-  } else {
-    ({ y, m } = previousBSTMonth(nowUtc));
-  }
-
-  // UTC midnight boundaries for the period (safe for all timezones because
-  // invoice.createdAt is UTC ms, so $gte/$lt on these values is correct).
-  const periodStart = new Date(Date.UTC(y, m - 1, 1)); // 1st 00:00 UTC
-  const periodEnd = new Date(Date.UTC(y, m, 1)); // next month 1st 00:00 UTC (exclusive)
-  const periodEndDisplay = new Date(Date.UTC(y, m, 0)); // last day of billing month
-
-  // Due date = 23:59:59.999 BST on the Nth day from now
-  const dueDate = endOfDayBST(nowUtc, DUE_DAYS);
-
+  const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || DEFAULT_DUE_DAYS;
   const triggeredBy = options.triggeredBy || "cron";
 
-  // ── Fetch all active labs ─────────────────────────────────────────────────
+  // Determine which month to bill
+  let period;
+  if (options.year && options.month) {
+    period = buildPeriod(parseInt(options.year), parseInt(options.month));
+  } else {
+    period = previousBSTMonth();
+  }
+
+  const { periodStart, periodEnd, periodEndDisplay } = period;
+
+  // dueDate = end of (today + DUE_DAYS) in BST, i.e. 23:59:59.999 BST of that day
+  const dueDate = endOfDayBST(nowUtc + DUE_DAYS * 24 * 60 * 60 * 1000);
+
   const labs = await db
     .collection("labs")
-    .find(
-      { isActive: true, "deletion.status": { $ne: true } },
-      { projection: { _id: 1, name: 1, labKey: 1, billing: 1 } },
-    )
+    .find({ "deletion.status": { $ne: true } }, { projection: { _id: 1, name: 1, labKey: 1, billing: 1 } })
     .toArray();
 
   let generated = 0;
@@ -105,54 +88,10 @@ export async function generateMonthlyBills(db, options = {}) {
 
   for (const lab of labs) {
     try {
-      // Idempotency: skip if a bill for this period already exists
-      const exists = await db
-        .collection("billings")
-        .findOne({ labId: lab._id, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
-
-      if (exists) {
-        skipped++;
-        continue;
-      }
-
-      const monthlyFee = lab.billing?.monthlyFee ?? 0;
-      const perInvoiceFee = lab.billing?.perInvoiceFee ?? 0;
-      const commission = lab.billing?.commission ?? 0;
-
-      const invoiceCount = await db.collection("invoices").countDocuments({
-        labId: lab._id,
-        "deletion.status": { $ne: true },
-        createdAt: {
-          $gte: periodStart.getTime(),
-          $lt: periodEnd.getTime(),
-        },
-      });
-
-      const perInvoiceNet = perInvoiceFee - commission;
-      const totalAmount = monthlyFee + perInvoiceNet * invoiceCount;
-      const isFree = totalAmount <= 0;
-
-      await db.collection("billings").insertOne({
-        labId: lab._id,
-        labKey: lab.labKey,
-        billingPeriodStart: periodStart,
-        billingPeriodEnd: periodEndDisplay,
-        invoiceCount,
-        breakdown: {
-          monthlyFee,
-          perInvoiceFee,
-          commission,
-          perInvoiceNet,
-        },
-        totalAmount: isFree ? 0 : totalAmount,
-        status: isFree ? "free" : "unpaid",
-        dueDate: isFree ? null : dueDate, // UTC ms, snapped to 23:59:59 BST
-        createdAt: nowUtc,
-        paidAt: null,
-        paidBy: null,
-      });
-
-      isFree ? free++ : generated++;
+      const { result } = await generateBillForLab(db, lab, periodStart, periodEnd, periodEndDisplay, dueDate, nowUtc);
+      if (result === "skipped") skipped++;
+      else if (result === "free") free++;
+      else generated++;
     } catch (err) {
       failedLabs.push({
         labId: lab._id,
@@ -162,7 +101,6 @@ export async function generateMonthlyBills(db, options = {}) {
     }
   }
 
-  // ── Record the run ────────────────────────────────────────────────────────
   const runDoc = {
     period: periodStart.toISOString().slice(0, 7), // "YYYY-MM"
     periodStart,
@@ -181,39 +119,35 @@ export async function generateMonthlyBills(db, options = {}) {
 
   console.log(
     "[billing]",
-    JSON.stringify({ period: runDoc.period, generated, free, skipped, failedCount: failedLabs.length }),
+    JSON.stringify({
+      period: runDoc.period,
+      generated,
+      free,
+      skipped,
+      failedCount: failedLabs.length,
+    }),
   );
 
   return runDoc;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Retry failed labs from a previous billing run ────────────────────────────
 
 export async function retryFailedLabs(db, run) {
-  const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || 7;
   const nowUtc = Date.now();
+  const DUE_DAYS = parseInt(process.env.BILLING_DUE_DAYS) || DEFAULT_DUE_DAYS;
 
   const periodStart = run.periodStart;
   const periodEnd = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1));
   const periodEndDisplay = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 0));
-
-  // Re-compute due date from *now* (retry may happen days later)
-  const dueDate = endOfDayBST(nowUtc, DUE_DAYS);
+  // Recalculate due date from NOW so retried labs get reasonable grace period
+  const dueDate = endOfDayBST(nowUtc + DUE_DAYS * 24 * 60 * 60 * 1000);
 
   const retried = [];
   const stillFailing = [];
 
   for (const failed of run.failedLabs) {
     try {
-      const exists = await db
-        .collection("billings")
-        .findOne({ labId: failed.labId, billingPeriodStart: periodStart }, { projection: { _id: 1 } });
-
-      if (exists) {
-        retried.push({ labId: failed.labId, result: "already existed" });
-        continue;
-      }
-
       const lab = await db
         .collection("labs")
         .findOne(
@@ -222,45 +156,19 @@ export async function retryFailedLabs(db, run) {
         );
 
       if (!lab) {
-        stillFailing.push({ labId: failed.labId, error: "Lab not found" });
+        stillFailing.push({ labId: failed.labId, labName: failed.labName, error: "Lab not found" });
         continue;
       }
 
-      const monthlyFee = lab.billing?.monthlyFee ?? 0;
-      const perInvoiceFee = lab.billing?.perInvoiceFee ?? 0;
-      const commission = lab.billing?.commission ?? 0;
+      const { result } = await generateBillForLab(db, lab, periodStart, periodEnd, periodEndDisplay, dueDate, nowUtc);
 
-      const invoiceCount = await db.collection("invoices").countDocuments({
-        labId: lab._id,
-        "deletion.status": { $ne: true },
-        createdAt: {
-          $gte: periodStart.getTime(),
-          $lt: periodEnd.getTime(),
-        },
-      });
-
-      const perInvoiceNet = perInvoiceFee - commission;
-      const totalAmount = monthlyFee + perInvoiceNet * invoiceCount;
-      const isFree = totalAmount <= 0;
-
-      await db.collection("billings").insertOne({
-        labId: lab._id,
-        labKey: lab.labKey,
-        billingPeriodStart: periodStart,
-        billingPeriodEnd: periodEndDisplay,
-        invoiceCount,
-        breakdown: { monthlyFee, perInvoiceFee, commission, perInvoiceNet },
-        totalAmount: isFree ? 0 : totalAmount,
-        status: isFree ? "free" : "unpaid",
-        dueDate: isFree ? null : dueDate,
-        createdAt: nowUtc,
-        paidAt: null,
-        paidBy: null,
-      });
-
-      retried.push({ labId: failed.labId, labName: lab.name, result: "success" });
+      retried.push({ labId: failed.labId, labName: lab.name, result });
     } catch (err) {
-      stillFailing.push({ labId: failed.labId, labName: failed.labName, error: err.message });
+      stillFailing.push({
+        labId: failed.labId,
+        labName: failed.labName,
+        error: err.message,
+      });
     }
   }
 
