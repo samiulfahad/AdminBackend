@@ -527,6 +527,316 @@ async function billingRoutes(fastify) {
       }
     },
   );
+
+  fastify.get(
+    "/billing/unpaid-labs",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Labs with unpaid bills — grouped, with month tags",
+        querystring: {
+          type: "object",
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+            skip: { type: "integer", minimum: 0, default: 0 },
+            search: { type: "string" },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const limit = Math.min(req.query.limit ?? 50, 100);
+        const skip = req.query.skip ?? 0;
+        const search = req.query.search?.trim();
+
+        // ── 1. Build lab filter (optional search) ──────────────────────────────
+        let labFilter = {};
+        if (search) {
+          // Match labKey exactly OR name as case-insensitive substring
+          labFilter = {
+            $or: [{ labKey: search }, { name: { $regex: search, $options: "i" } }],
+          };
+        }
+
+        // ── 2. Aggregate unpaid bills, grouped by labId ────────────────────────
+        const pipeline = [
+          // Only unpaid bills
+          { $match: { status: "unpaid" } },
+
+          // Sort newest period first within each group
+          { $sort: { billingPeriodStart: -1 } },
+
+          // Group by lab
+          {
+            $group: {
+              _id: "$labId",
+              unpaidTotal: { $sum: "$totalAmount" },
+              bills: {
+                $push: {
+                  billingId: "$_id",
+                  billingPeriodStart: "$billingPeriodStart",
+                  billingPeriodEnd: "$billingPeriodEnd",
+                  dueDate: "$dueDate",
+                  totalAmount: "$totalAmount",
+                  invoiceCount: "$invoiceCount",
+                  breakdown: "$breakdown",
+                },
+              },
+            },
+          },
+
+          // Join lab details
+          {
+            $lookup: {
+              from: "labs",
+              localField: "_id",
+              foreignField: "_id",
+              as: "labDoc",
+              pipeline: [
+                {
+                  $project: {
+                    name: 1,
+                    labKey: 1,
+                    isActive: 1,
+                    billing: 1,
+                  },
+                },
+              ],
+            },
+          },
+          { $unwind: { path: "$labDoc", preserveNullAndEmpty: false } },
+
+          // Apply search filter on lab fields (if any)
+          ...(search
+            ? [
+                {
+                  $match: {
+                    $or: [{ "labDoc.labKey": search }, { "labDoc.name": { $regex: search, $options: "i" } }],
+                  },
+                },
+              ]
+            : []),
+
+          // Sort labs: highest unpaid total first
+          { $sort: { unpaidTotal: -1 } },
+        ];
+
+        // Count total matching labs before pagination
+        const countPipeline = [...pipeline, { $count: "total" }];
+        const [countResult, labDocs] = await Promise.all([
+          col().aggregate(countPipeline).toArray(),
+          col()
+            .aggregate([...pipeline, { $skip: skip }, { $limit: limit }])
+            .toArray(),
+        ]);
+
+        const total = countResult[0]?.total ?? 0;
+        const now = Date.now();
+
+        // ── 3. Shape the response ──────────────────────────────────────────────
+        const MONTH_FMT = new Intl.DateTimeFormat("en-GB", {
+          month: "short",
+          year: "numeric",
+        });
+
+        const labs = labDocs.map((doc) => ({
+          labId: doc._id,
+          labKey: doc.labDoc.labKey,
+          labName: doc.labDoc.name,
+          isActive: doc.labDoc.isActive,
+          unpaidTotal: doc.unpaidTotal,
+          unpaidMonths: doc.bills.map((b) => ({
+            billingId: b.billingId,
+            month: MONTH_FMT.format(new Date(b.billingPeriodStart)), // e.g. "Jan 2025"
+            billingPeriodStart: b.billingPeriodStart,
+            billingPeriodEnd: b.billingPeriodEnd,
+            dueDate: b.dueDate,
+            isOverdue: now > b.dueDate,
+            totalAmount: b.totalAmount,
+            invoiceCount: b.invoiceCount ?? 0,
+            breakdown: b.breakdown ?? null,
+          })),
+        }));
+
+        return reply.send({ labs, total });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch unpaid labs" });
+      }
+    },
+  );
+
+  // ── GET /billing/lab/by-key/:labKey/history ───────────────────────────────────
+  // Full billing history for a lab looked up by labKey.
+  // Returns: lab info + all bills (newest first) + aggregate stats.
+  fastify.get(
+    "/billing/lab/by-key/:labKey/history",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Full billing history for a lab by labKey",
+        params: {
+          type: "object",
+          required: ["labKey"],
+          properties: {
+            labKey: { type: "string", minLength: 1, maxLength: 50 },
+          },
+        },
+        querystring: {
+          type: "object",
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 48, default: 24 },
+            skip: { type: "integer", minimum: 0, default: 0 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const labsCol = fastify.mongo.db.collection("labs");
+
+        // Find lab by labKey
+        const lab = await labsCol.findOne(
+          { labKey: req.params.labKey },
+          { projection: { name: 1, labKey: 1, billing: 1, isActive: 1 } },
+        );
+        if (!lab) return reply.code(404).send({ error: "Lab not found" });
+
+        const limit = Math.min(req.query.limit ?? 24, 48);
+        const skip = req.query.skip ?? 0;
+
+        const [bills, total, aggregate] = await Promise.all([
+          // All bills for this lab, newest first
+          col()
+            .find(
+              { labId: lab._id },
+              {
+                projection: {
+                  status: 1,
+                  totalAmount: 1,
+                  dueDate: 1,
+                  billingPeriodStart: 1,
+                  billingPeriodEnd: 1,
+                  invoiceCount: 1,
+                  breakdown: 1,
+                  paidAt: 1,
+                  paidBy: 1,
+                  createdAt: 1,
+                },
+              },
+            )
+            .sort({ billingPeriodStart: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray(),
+
+          col().countDocuments({ labId: lab._id }),
+
+          // Aggregate stats by status
+          col()
+            .aggregate([
+              { $match: { labId: lab._id } },
+              {
+                $group: {
+                  _id: "$status",
+                  count: { $sum: 1 },
+                  total: { $sum: "$totalAmount" },
+                },
+              },
+            ])
+            .toArray(),
+        ]);
+
+        const stats = {
+          paid: { count: 0, total: 0 },
+          unpaid: { count: 0, total: 0 },
+          free: { count: 0, total: 0 },
+        };
+        for (const g of aggregate) {
+          if (g._id in stats) stats[g._id] = { count: g.count, total: g.total };
+        }
+
+        return reply.send({ lab, bills, total, stats });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch lab billing history" });
+      }
+    },
+  );
+
+  // ── GET /billing/lab/by-key/:labKey/summary ───────────────────────────────────
+  // Same as /billing/lab/:labId/summary but accepts labKey instead of ObjectId.
+  fastify.get(
+    "/billing/lab/by-key/:labKey/summary",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Unpaid bill + aggregate summary for a lab by labKey",
+        params: {
+          type: "object",
+          required: ["labKey"],
+          properties: {
+            labKey: { type: "string", minLength: 1, maxLength: 50 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const labsCol = fastify.mongo.db.collection("labs");
+
+        const lab = await labsCol.findOne(
+          { labKey: req.params.labKey },
+          { projection: { name: 1, labKey: 1, billing: 1, isActive: 1 } },
+        );
+        if (!lab) return reply.code(404).send({ error: "Lab not found" });
+
+        const [unpaidBill, aggregate] = await Promise.all([
+          col().findOne({ labId: lab._id, status: "unpaid" }, { sort: { billingPeriodStart: -1 } }),
+          col()
+            .aggregate([
+              { $match: { labId: lab._id } },
+              {
+                $group: {
+                  _id: "$status",
+                  count: { $sum: 1 },
+                  total: { $sum: "$totalAmount" },
+                },
+              },
+            ])
+            .toArray(),
+        ]);
+
+        const stats = {
+          paid: { count: 0, total: 0 },
+          unpaid: { count: 0, total: 0 },
+          free: { count: 0, total: 0 },
+        };
+        for (const g of aggregate) {
+          if (g._id in stats) stats[g._id] = { count: g.count, total: g.total };
+        }
+
+        const currentBill = unpaidBill
+          ? {
+              id: unpaidBill._id,
+              amount: unpaidBill.totalAmount,
+              dueDate: unpaidBill.dueDate,
+              isOverdue: Date.now() > unpaidBill.dueDate,
+              billingPeriodStart: unpaidBill.billingPeriodStart,
+              billingPeriodEnd: unpaidBill.billingPeriodEnd,
+              invoiceCount: unpaidBill.invoiceCount,
+              breakdown: unpaidBill.breakdown,
+            }
+          : null;
+
+        return reply.send({ lab, currentBill, stats });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch lab billing summary" });
+      }
+    },
+  );
 }
 
 export default billingRoutes;
