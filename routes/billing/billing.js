@@ -3,10 +3,9 @@
 import { nowBST, endOfDayBST, parseDateStringToBSTEndOfDay } from "../../utils/time.js";
 import { generateMonthlyBills, retryFailedLabs } from "../../jobs/generateMonthlyBills.js";
 
-// @fastify/mongodb exposes fastify.mongo.db — ObjectIds come back as native BSON
-// from the driver; we never need to manually coerce them for find/aggregate.
-// For params that arrive as strings we use the driver's ObjectId directly.
 import { ObjectId } from "@fastify/mongodb";
+
+const BST_OFFSET_MS = 6 * 60 * 60 * 1000;
 
 const toOid = (v) => {
   try {
@@ -21,8 +20,6 @@ async function billingRoutes(fastify) {
   const runsCol = () => fastify.mongo.db.collection("billingRuns");
 
   // ── GET /billing/unpaid-labs ──────────────────────────────────────────────
-  // Lightweight summary only — unpaid bill totals + month tags per lab.
-  // History is NOT included; load it on demand via /billing/lab/:labKey/history.
   fastify.get(
     "/billing/unpaid-labs",
     {
@@ -55,7 +52,6 @@ async function billingRoutes(fastify) {
             ]
           : [];
 
-        // Single pass: group unpaid bills → join lab → facet for count + page
         const pipeline = [
           { $match: { status: "unpaid" } },
           { $sort: { billingPeriodStart: -1 } },
@@ -84,7 +80,6 @@ async function billingRoutes(fastify) {
               pipeline: [{ $project: { name: 1, labKey: 1, isActive: 1 } }],
             },
           },
-          // ✅ preserveNullAndEmptyArrays (not preserveNullAndEmpty)
           { $unwind: { path: "$labDoc", preserveNullAndEmptyArrays: false } },
           ...searchStage,
           { $sort: { unpaidTotal: -1 } },
@@ -110,7 +105,8 @@ async function billingRoutes(fastify) {
           unpaidTotal: doc.unpaidTotal,
           unpaidMonths: doc.bills.map((b) => ({
             billingId: b.billingId,
-            month: MONTH_FMT.format(new Date(b.billingPeriodStart)),
+            // ✅ shift by BST offset so the month name reflects Dhaka time, not UTC
+            month: MONTH_FMT.format(new Date(b.billingPeriodStart + BST_OFFSET_MS)),
             billingPeriodStart: b.billingPeriodStart,
             billingPeriodEnd: b.billingPeriodEnd,
             dueDate: b.dueDate,
@@ -129,7 +125,6 @@ async function billingRoutes(fastify) {
   );
 
   // ── GET /billing/lab/:labKey/history ──────────────────────────────────────
-  // On-demand: only called when user expands a lab row.
   fastify.get(
     "/billing/lab/:labKey/history",
     {
@@ -210,7 +205,6 @@ async function billingRoutes(fastify) {
   );
 
   // ── GET /billing/lab/:labKey/summary ──────────────────────────────────────
-  // Used by Lab Lookup tab.
   fastify.get(
     "/billing/lab/:labKey/summary",
     {
@@ -416,7 +410,7 @@ async function billingRoutes(fastify) {
 
         const maxAllowedMs = endOfDayBST(bill.dueDate + 10 * 24 * 60 * 60 * 1000);
         if (newDueDateMs > maxAllowedMs) {
-          const maxBSTDate = new Date(maxAllowedMs + 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const maxBSTDate = new Date(maxAllowedMs + BST_OFFSET_MS).toISOString().slice(0, 10);
           return reply.code(400).send({
             error: `Max allowed: ${maxBSTDate} (BST). Cannot extend more than 10 days.`,
             maxAllowedBSTDate: maxBSTDate,
@@ -539,101 +533,7 @@ async function billingRoutes(fastify) {
     },
   );
 
-  // ── ADD THIS ROUTE to billing.js (inside billingRoutes function) ───────────────
-  //
-  // GET /billing/month-overview
-  // Returns all billing periods grouped by month with paid/unpaid/free counts + totals.
-  // Used by the new "Month Overview" tab in AdminBilling.jsx.
-
-  fastify.get(
-    "/billing/month-overview",
-    {
-      schema: {
-        tags: ["Billing"],
-        summary: "All billing periods grouped by month — paid/unpaid/free counts and totals",
-      },
-    },
-    async (req, reply) => {
-      try {
-        const pipeline = [
-          // Group by billingPeriodStart (each period is one month), then by status
-          {
-            $group: {
-              _id: {
-                periodStart: "$billingPeriodStart",
-                status: "$status",
-              },
-              count: { $sum: 1 },
-              total: { $sum: "$totalAmount" },
-            },
-          },
-          // Reshape: one doc per period with paid/unpaid/free sub-objects
-          {
-            $group: {
-              _id: "$_id.periodStart",
-              statuses: {
-                $push: {
-                  status: "$_id.status",
-                  count: "$count",
-                  total: "$total",
-                },
-              },
-            },
-          },
-          { $sort: { _id: -1 } }, // newest first
-        ];
-
-        const raw = await col().aggregate(pipeline).toArray();
-
-        const MONTH_FMT = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" });
-
-        const months = raw.map((doc) => {
-          const periodStart = doc._id; // UTC ms
-          const date = new Date(periodStart);
-
-          // Build status map
-          const stats = { paid: { count: 0, total: 0 }, unpaid: { count: 0, total: 0 }, free: { count: 0, total: 0 } };
-          for (const s of doc.statuses) {
-            if (s.status in stats) stats[s.status] = { count: s.count, total: s.total };
-          }
-
-          // BST year: shift by +6h to get BST date, then read UTC year/month
-          const bstMs = periodStart + 6 * 60 * 60 * 1000;
-          const bstDate = new Date(bstMs);
-
-          return {
-            period: `${bstDate.getUTCFullYear()}-${String(bstDate.getUTCMonth() + 1).padStart(2, "0")}`,
-            label: MONTH_FMT.format(date),
-            year: bstDate.getUTCFullYear(),
-            month: bstDate.getUTCMonth() + 1, // 1-indexed
-            periodStart,
-            totalLabs: stats.paid.count + stats.unpaid.count + stats.free.count,
-            paid: stats.paid,
-            unpaid: stats.unpaid,
-            free: stats.free,
-          };
-        });
-
-        return reply.send({ months });
-      } catch (err) {
-        req.log.error(err);
-        return reply.code(500).send({ error: "Failed to fetch monthly billing overview" });
-      }
-    },
-  );
-
-  // ── ADD THIS ROUTE to billing.js (inside billingRoutes function) ──────────────
-  //
-  // GET /billing/period-bills
-  // Returns all bills for a specific billingPeriodStart, joined with lab info.
-  // Used by the Month Overview tab drill-down in AdminBilling.jsx.
-  //
-  // Query params:
-  //   periodStart  (integer, required) — the billingPeriodStart timestamp in ms
-  //   skip         (integer, default 0)
-  //   limit        (integer, default 30, max 100)
-  //   status       (string, optional) — filter by "paid" | "unpaid" | "free"
-
+  // ── GET /billing/period-bills ─────────────────────────────────────────────
   fastify.get(
     "/billing/period-bills",
     {
@@ -691,7 +591,7 @@ async function billingRoutes(fastify) {
               isActive: { $ifNull: ["$labDoc.isActive", false] },
             },
           },
-          { $sort: { status: 1, totalAmount: -1 } }, // unpaid first, then by amount desc
+          { $sort: { status: 1, totalAmount: -1 } },
           {
             $facet: {
               total: [{ $count: "n" }],
