@@ -667,6 +667,44 @@ async function billingRoutes(fastify) {
       }
     },
   );
+
+  // ── DELETE /billing/period/:periodStart ───────────────────────────────────────
+  fastify.delete(
+    "/billing/period/:periodStart",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "Delete all bills for a specific billing period",
+        params: {
+          type: "object",
+          required: ["periodStart"],
+          properties: { periodStart: { type: "string", pattern: "^\\d+$" } },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const periodStart = parseInt(req.params.periodStart, 10);
+        if (!Number.isFinite(periodStart)) {
+          return reply.code(400).send({ error: "Invalid periodStart" });
+        }
+
+        // Dry-run count first so we can return how many were deleted
+        const count = await col().countDocuments({ billingPeriodStart: periodStart });
+        if (count === 0) {
+          return reply.code(404).send({ error: "No bills found for this period" });
+        }
+
+        await col().deleteMany({ billingPeriodStart: periodStart });
+
+        fastify.log.info({ periodStart, count }, "[billing] Period bills deleted");
+        return reply.send({ success: true, deleted: count });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to delete period bills" });
+      }
+    },
+  );
 }
 
 export default billingRoutes;
