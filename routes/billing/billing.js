@@ -105,7 +105,6 @@ async function billingRoutes(fastify) {
           unpaidTotal: doc.unpaidTotal,
           unpaidMonths: doc.bills.map((b) => ({
             billingId: b.billingId,
-            // ✅ shift by BST offset so the month name reflects Dhaka time, not UTC
             month: MONTH_FMT.format(new Date(b.billingPeriodStart + BST_OFFSET_MS)),
             billingPeriodStart: b.billingPeriodStart,
             billingPeriodEnd: b.billingPeriodEnd,
@@ -315,6 +314,62 @@ async function billingRoutes(fastify) {
       } catch (err) {
         req.log.error(err);
         return reply.code(500).send({ error: "Failed to fetch billing runs" });
+      }
+    },
+  );
+
+  // ── GET /billing/month-overview ───────────────────────────────────────────
+  fastify.get(
+    "/billing/month-overview",
+    {
+      schema: {
+        tags: ["Billing"],
+        summary: "All billing periods grouped with paid/unpaid/free stats",
+      },
+    },
+    async (req, reply) => {
+      try {
+        const pipeline = [
+          {
+            $group: {
+              _id: "$billingPeriodStart",
+              billingPeriodEnd: { $first: "$billingPeriodEnd" },
+              totalLabs: { $sum: 1 },
+              paidCount: { $sum: { $cond: [{ $eq: ["$status", "paid"] }, 1, 0] } },
+              unpaidCount: { $sum: { $cond: [{ $eq: ["$status", "unpaid"] }, 1, 0] } },
+              freeCount: { $sum: { $cond: [{ $eq: ["$status", "free"] }, 1, 0] } },
+              paidTotal: { $sum: { $cond: [{ $eq: ["$status", "paid"] }, "$totalAmount", 0] } },
+              unpaidTotal: { $sum: { $cond: [{ $eq: ["$status", "unpaid"] }, "$totalAmount", 0] } },
+              freeTotal: { $sum: { $cond: [{ $eq: ["$status", "free"] }, "$totalAmount", 0] } },
+            },
+          },
+          { $sort: { _id: -1 } },
+        ];
+
+        const rows = await col().aggregate(pipeline).toArray();
+
+        const MONTH_FMT = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" });
+
+        const months = rows.map((r) => {
+          const bstDate = new Date(r._id + BST_OFFSET_MS);
+          return {
+            // e.g. "2026-03" — used as the <select> key/value in the frontend
+            period: bstDate.toISOString().slice(0, 7),
+            // e.g. "Mar 2026"
+            label: MONTH_FMT.format(bstDate),
+            periodStart: r._id,
+            periodEnd: r.billingPeriodEnd,
+            totalLabs: r.totalLabs,
+            paid: { count: r.paidCount, total: r.paidTotal },
+            unpaid: { count: r.unpaidCount, total: r.unpaidTotal },
+            free: { count: r.freeCount, total: r.freeTotal },
+          };
+        });
+
+        return reply.send({ months });
+      } catch (err) {
+        req.log.error(err);
+        return reply.code(500).send({ error: "Failed to fetch month overview" });
       }
     },
   );
